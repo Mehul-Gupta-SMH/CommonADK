@@ -145,3 +145,22 @@ tasks.md                 # action log
 - **M2 — Google ADK adapter:** example runs end-to-end on Google ADK.
 - **M3 — OpenAI Agents adapter:** *same example* runs unmodified — the hypothesis test.
 - **M4 — CLI & docs:** `commonadk validate | render | run`, README, usage docs.
+
+## Deferred / roadmap
+
+- **Mixed-target spawning (heterogeneous deployments).** Future versions will allow
+  pinning specific agents to specific SDKs within one project — e.g. `researcher`
+  runs on Google ADK while `writer` runs on OpenAI Agents. **v1 constraint: one
+  target per build** — `project.build(..., target=...)` instantiates the whole
+  interaction graph under that single SDK.
+  Design implications honored in v1 so this stays possible later:
+  - `agent-config.yaml` reserves a per-agent `runtime:` key (unset in v1; validation
+    warns if present that it is not yet honored).
+  - The interaction layer stays SDK-neutral: edges never encode SDK-specific
+    mechanics, so an edge can later span two runtimes.
+  - Cross-SDK edges will need a wire protocol between frameworks (A2A is the
+    leading candidate); adapters will grow an "expose/consume remote agent" path
+    at that point.
+- Richer edge semantics: sequential/parallel pipelines, loops, shared state.
+- Additional adapters (CrewAI, LangGraph, Claude Agent SDK, ...) — folder appears
+  only when the adapter lands.

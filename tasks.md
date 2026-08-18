@@ -16,3 +16,4 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-18 | Orchestrator | Planning session: hypothesis, mechanism (runtime factory), interaction source of truth (YAML → generated mermaid), v1 targets (Google ADK + OpenAI Agents), LiteLLM model layer, `requires.env` contract settled |
 | 2026-08-18 | Orchestrator | Wrote `plan.md` and `tasks.md`; committed to `claude/project-planning-hypothesis-qopc3j` |
 | 2026-08-18 | Orchestrator | Spawned Sonnet 5 subagent to implement M1 |
+| 2026-08-18 | Orchestrator | Roadmap added to `plan.md`: mixed-target spawning (per-agent runtime pinning, future); v1 stays single-target per build; reserved `runtime:` key in agent-config schema |
