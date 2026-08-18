@@ -5,6 +5,7 @@ package (M1) is the framework-neutral core: models, loader, validation, and
 the mermaid renderer. It has no dependency on any agent SDK.
 """
 
+from .adapters import BaseAdapter, get_adapter
 from .loader import load
 from .mermaid import render_mermaid, write_interaction_layer
 from .models import (
@@ -22,6 +23,8 @@ from .models import (
 from .validation import ValidationError
 
 __all__ = [
+    "BaseAdapter",
+    "get_adapter",
     "load",
     "render_mermaid",
     "write_interaction_layer",

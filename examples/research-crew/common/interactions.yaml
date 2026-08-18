@@ -3,9 +3,6 @@ edges:
   - from: coordinator
     to: researcher
     type: delegate
-  - from: coordinator
-    to: writer
-    type: delegate
   - from: researcher
     to: writer
     type: handoff

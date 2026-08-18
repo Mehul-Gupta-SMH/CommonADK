@@ -214,6 +214,20 @@ class Project(BaseModel):
             f"{sorted(self.config.model_aliases)}"
         )
 
+    def build(self, agent_name: str, target: str) -> Any:
+        """Build a live, SDK-native agent for `agent_name` under `target`.
+
+        Thin delegate to `commonadk.adapters.get_adapter(target).build(...)`
+        (plan.md, "User-facing API": `project.build("coordinator",
+        target="google-adk")`). The import is local to this method, not at
+        module scope, so loading a `Project` never requires any agent SDK to
+        be installed -- only calling `build()` for a given target does, and
+        only that target's SDK.
+        """
+        from .adapters import get_adapter
+
+        return get_adapter(target).build(self, agent_name)
+
     def check_env(self, agent_name: str) -> list[str]:
         """Return the names of required env vars that are missing for this agent."""
         import os

@@ -10,6 +10,5 @@ flowchart TD
     researcher["researcher"]
     writer["writer"]
     coordinator -- delegate --> researcher
-    coordinator -- delegate --> writer
     researcher -. handoff .-> writer
 ```

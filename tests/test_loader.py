@@ -47,9 +47,14 @@ def test_edges_present(example_common_dir):
     project = commonadk.load(example_common_dir)
     edges = {(e.from_, e.to, e.type) for e in project.graph.edges}
 
-    assert ("coordinator", "researcher", "delegate") in edges
-    assert ("coordinator", "writer", "delegate") in edges
-    assert ("researcher", "writer", "handoff") in edges
+    # Clean tree (plan.md v1 intersection rule / M3 hypothesis test):
+    # coordinator -delegate-> researcher -handoff-> writer, with no direct
+    # coordinator -> writer edge, so the reachable graph builds unmodified
+    # as an ADK sub_agents tree.
+    assert edges == {
+        ("coordinator", "researcher", "delegate"),
+        ("researcher", "writer", "handoff"),
+    }
     assert project.graph.entry == "coordinator"
 
 
