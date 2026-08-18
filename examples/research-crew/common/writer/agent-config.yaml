@@ -1,0 +1,17 @@
+name: writer
+description: Turns research findings into a short, well-organized summary.
+
+model: fast
+model_params:
+  temperature: 0.4
+
+tools:
+  - count_words
+  - format_as_markdown
+
+requires:
+  env: []
+
+targets:
+  google-adk: {}
+  openai: {}

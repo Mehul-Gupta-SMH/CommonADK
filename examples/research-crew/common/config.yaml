@@ -1,0 +1,7 @@
+name: research-crew
+entry: coordinator
+targets: [google-adk, openai]
+default_model: fast
+model_aliases:
+  fast: gemini/gemini-2.5-flash
+  smart: anthropic/claude-sonnet-5
