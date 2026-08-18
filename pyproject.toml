@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "commonadk"
+version = "0.1.0"
+description = "Define an agent system once, in a framework-neutral format, and materialize it into any agent SDK."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Mehul Gupta", email = "mehulgupta85@gmail.com" },
+]
+dependencies = [
+    "pydantic>=2",
+    "pyyaml",
+]
+
+[project.scripts]
+commonadk = "commonadk.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+google = [
+    "google-adk",
+    # google-adk's own LiteLlm wrapper (google.adk.models.lite_llm) only
+    # checks `importlib.util.find_spec("litellm")` -- it does NOT need
+    # google-adk's "extensions" extra, which pulls in a large, unrelated
+    # bundle (crewai, langgraph, llama-index, chromadb, ...). Depending on
+    # the standalone `litellm` package directly is required so non-gemini
+    # models (plan.md model routing) can be wrapped with LiteLlm.
+    "litellm",
+]
+openai = [
+    "openai-agents[litellm]",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/commonadk"]

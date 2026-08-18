@@ -1,0 +1,25 @@
+name: researcher
+description: Finds and summarizes sources for a topic.
+
+model: gemini/gemini-2.5-pro
+model_params:
+  temperature: 0.2
+  max_tokens: 4096
+
+tools:
+  - search_web
+  - fetch_page
+
+requires:
+  env:
+    - name: TAVILY_API_KEY
+      description: Search API key used by search_web
+      required: true
+    - name: POSTGRES_DSN
+      description: Connection string for the citations database
+      required: false
+
+targets:
+  google-adk:
+    model: gemini-2.5-flash
+  openai: {}

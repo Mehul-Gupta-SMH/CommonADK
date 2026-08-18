@@ -1,0 +1,17 @@
+name: coordinator
+description: Routes a user's research request to the researcher and writer agents.
+
+model: fast
+model_params:
+  temperature: 0.1
+
+tools:
+  - split_into_subtopics
+  - format_handoff_note
+
+requires:
+  env: []
+
+targets:
+  google-adk: {}
+  openai: {}

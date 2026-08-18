@@ -1,0 +1,8 @@
+entry: coordinator
+edges:
+  - from: coordinator
+    to: researcher
+    type: delegate
+  - from: researcher
+    to: writer
+    type: handoff
