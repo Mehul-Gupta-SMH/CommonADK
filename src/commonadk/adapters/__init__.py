@@ -16,6 +16,7 @@ from .base import BaseAdapter
 # target -> (module to import, class name to instantiate, pip extra to suggest)
 _REGISTRY: dict[str, tuple[str, str, str]] = {
     "google-adk": ("commonadk.adapters.google_adk", "GoogleADKAdapter", "google"),
+    "openai": ("commonadk.adapters.openai_agents", "OpenAIAgentsAdapter", "openai"),
 }
 
 

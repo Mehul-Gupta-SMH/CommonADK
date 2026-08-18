@@ -6,7 +6,7 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 
 - [x] **M1 — Core**: models, loader, validation, mermaid renderer, example, tests (31 tests passing)
 - [x] **M2 — Google ADK adapter** (43 tests passing; entry agent builds full tree)
-- [ ] **M3 — OpenAI Agents adapter** (hypothesis test: same `common/` runs on both)
+- [x] **M3 — OpenAI Agents adapter** (hypothesis test PASSED: same `common/` builds on both SDKs; 53 tests)
 - [ ] **M4 — CLI & docs**
 
 ## Action log
@@ -25,3 +25,5 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-18 | Orchestrator | Reviewed M2: adapter approved; flagged example graph (writer had two parents — unbuildable on Google ADK, would break M3 hypothesis test) |
 | 2026-08-18 | Sonnet 5 subagent | Follow-up: example reshaped to clean tree (coordinator→researcher→writer), interaction-layer.md regenerated, multi-parent/cycle coverage moved to fixtures |
 | 2026-08-18 | Orchestrator | Independently reran suite (43 passing) + smoke-built coordinator tree on google-adk; committed and pushed M2 |
+| 2026-08-18 | Sonnet 5 subagent | Implemented M3: OpenAIAgentsAdapter (native openai vs LitellmModel routing, memoized shared instances for multi-parent graphs, cycle-safe two-pass wiring), env preflight hoisted to BaseAdapter, 10 new tests incl. `test_same_project_builds_on_both_targets` |
+| 2026-08-18 | Orchestrator | Reviewed M3: approved; independently reran suite (53 passing) and live-verified the hypothesis — one Project builds coordinator on google-adk (sub_agents tree) and openai (handoff graph) from the same `common/`; committed and pushed |

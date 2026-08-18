@@ -31,6 +31,9 @@ google = [
     # models (plan.md model routing) can be wrapped with LiteLlm.
     "litellm",
 ]
+openai = [
+    "openai-agents[litellm]",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/commonadk"]

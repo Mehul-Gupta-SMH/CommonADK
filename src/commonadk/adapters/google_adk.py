@@ -49,47 +49,6 @@ class GoogleADKAdapter(BaseAdapter):
         claimed: dict[str, str] = {}
         return self._build_agent(project, agent_name, claimed, ancestors=(), parent=None)
 
-    # -- env preflight --------------------------------------------------
-
-    def _check_env(self, project: "Project", agent_name: str) -> None:
-        """Fail loudly, up front, if any reachable agent is missing a required env var.
-
-        Checks `agent_name` and every agent reachable from it via
-        `interactions.yaml` edges (not just its direct sub_agents) --
-        building the tree can transitively depend on any of them.
-        """
-        missing_lines: list[str] = []
-        for name in self._reachable_agents(project, agent_name):
-            agent = project.agents[name]
-            missing_names = set(project.check_env(name))
-            if not missing_names:
-                continue
-            for req in agent.config.requires.env:
-                if req.name in missing_names:
-                    detail = f"{req.name} ({req.description})" if req.description else req.name
-                    missing_lines.append(f"  - {name}: {detail}")
-
-        if missing_lines:
-            raise OSError(
-                "commonadk: missing required environment variable(s) for "
-                f"target 'google-adk' (building '{agent_name}'):\n"
-                + "\n".join(missing_lines)
-            )
-
-    def _reachable_agents(self, project: "Project", start: str) -> list[str]:
-        """Every agent name reachable from `start` (via edges), including `start`."""
-        seen = [start]
-        seen_set = {start}
-        i = 0
-        while i < len(seen):
-            current = seen[i]
-            i += 1
-            for edge in project.graph.edges:
-                if edge.from_ == current and edge.to not in seen_set:
-                    seen_set.add(edge.to)
-                    seen.append(edge.to)
-        return seen
-
     # -- tree construction ------------------------------------------------
 
     def _build_agent(
