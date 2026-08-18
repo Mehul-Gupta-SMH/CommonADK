@@ -16,7 +16,7 @@ from .models import InteractionGraph
 _GENERATED_HEADER = (
     "<!-- GENERATED FILE -- do not edit by hand.\n"
     "     Regenerate with `commonadk.mermaid.write_interaction_layer`\n"
-    "     (or `commonadk render`, once the CLI lands) from interactions.yaml. -->\n"
+    "     (or `commonadk render`) from interactions.yaml. -->\n"
 )
 
 
