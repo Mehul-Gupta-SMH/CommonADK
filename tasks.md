@@ -9,6 +9,11 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 - [x] **M3 — OpenAI Agents adapter** (hypothesis test PASSED: same `common/` builds on both SDKs; 53 tests)
 - [x] **M4 — CLI & docs** (`commonadk validate|render|run` + README; 64 tests passing)
 
+- [ ] **M5 — Claude Agent SDK adapter**
+- [ ] **M6 — CrewAI adapter**
+- [ ] **M7 — AutoGen adapter**
+- [ ] **M8 — LangGraph adapter**
+
 ## Action log
 
 | Date | Actor | Action |
