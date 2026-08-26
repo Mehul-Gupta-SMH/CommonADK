@@ -23,3 +23,5 @@ targets:
   google-adk:
     model: gemini-2.5-flash
   openai: {}
+  claude:
+    model: claude-sonnet-5

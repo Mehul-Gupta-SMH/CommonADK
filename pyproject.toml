@@ -37,6 +37,11 @@ google = [
 openai = [
     "openai-agents[litellm]",
 ]
+claude = [
+    # Anthropic-native only -- no LiteLLM path for this target (see
+    # adapters/claude_agent.py's module docstring), so no litellm dependency.
+    "claude-agent-sdk",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/commonadk"]

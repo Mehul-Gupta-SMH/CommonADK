@@ -208,23 +208,8 @@ def test_optional_env_var_absence_does_not_block(example_common_dir, tavily_env)
     agent = project.build("researcher", target="openai")  # must not raise
     assert agent.name == "researcher"
 
-
 # ---------------------------------------------------------------------------
-# the hypothesis test (plan.md "v1 success criterion")
+# the cross-target hypothesis test (plan.md "v1 success criterion") now
+# lives in tests/test_hypothesis.py, parametrized over every SDK target
+# (google-adk, openai, claude) instead of being duplicated per adapter file.
 # ---------------------------------------------------------------------------
-
-
-def test_same_project_builds_on_both_targets(example_common_dir, tavily_env):
-    # This is the v1 success criterion from plan.md ("Hypothesis"): the same
-    # `common/` folder must build and run unmodified on both Google ADK and
-    # the OpenAI Agents SDK. Load the project ONCE and build the same entry
-    # agent under both targets from that single Project object.
-    pytest.importorskip("google.adk")
-
-    project = commonadk.load(example_common_dir)
-
-    google_agent = project.build("coordinator", target="google-adk")
-    openai_agent = project.build("coordinator", target="openai")
-
-    assert google_agent.name == "coordinator"
-    assert openai_agent.name == "coordinator"

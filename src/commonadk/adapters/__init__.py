@@ -17,6 +17,7 @@ from .base import BaseAdapter
 _REGISTRY: dict[str, tuple[str, str, str]] = {
     "google-adk": ("commonadk.adapters.google_adk", "GoogleADKAdapter", "google"),
     "openai": ("commonadk.adapters.openai_agents", "OpenAIAgentsAdapter", "openai"),
+    "claude": ("commonadk.adapters.claude_agent", "ClaudeAgentSDKAdapter", "claude"),
 }
 
 

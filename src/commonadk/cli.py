@@ -6,14 +6,18 @@ Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
   print a human-readable summary (or the error list, on failure).
 - `commonadk render <common-dir>` -- regenerate `interaction-layer.md` from
   `interactions.yaml`.
-- `commonadk run <common-dir> --target {google-adk,openai} PROMPT` -- build an
-  agent for a target SDK and execute one turn.
+- `commonadk run <common-dir> --target {google-adk,openai,claude} PROMPT` --
+  build an agent for a target SDK and execute one turn.
 
 `validate` and `render` never need an agent SDK installed -- they only touch
 `loader.py`/`mermaid.py`, which have no SDK imports at module scope. `run`
 does need one, but only for the target actually requested, so every
 SDK-touching import in this module lives inside the function that uses it
-(see `_run_google_adk` / `_run_openai`), never at module scope.
+(see `_run_google_adk` / `_run_openai` / `_run_claude`), never at module
+scope. `_run_claude` additionally preflights `ANTHROPIC_API_KEY` itself --
+the Claude Agent SDK's bundled CLI needs it to authenticate, but (unlike
+`requires.env` in `agent-config.yaml`) nothing in the SDK declares or checks
+for it up front.
 
 Every command funnels its expected failure modes -- `ValidationError` (bad
 project), `OSError` (missing required env var, from the adapters' env
@@ -84,8 +88,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--target",
         required=True,
-        metavar="{google-adk,openai}",
-        help="Agent SDK to build against: google-adk or openai",
+        metavar="{google-adk,openai,claude}",
+        help="Agent SDK to build against: google-adk, openai, or claude",
     )
     run_p.add_argument(
         "--agent",
@@ -243,9 +247,34 @@ def _run_openai(project: "Project", agent_name: str, prompt: str) -> str:
     return str(result.final_output)
 
 
+def _run_claude(project: "Project", agent_name: str, prompt: str) -> str:
+    import asyncio
+
+    from claude_agent_sdk import ResultMessage, query
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise OSError(
+            "commonadk: missing required environment variable for target "
+            "'claude': ANTHROPIC_API_KEY (the Claude Agent SDK's bundled "
+            "CLI needs it to authenticate with the Anthropic API)"
+        )
+
+    options = project.build(agent_name, target="claude")
+
+    async def _invoke() -> str:
+        chunks: list[str] = []
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage) and message.result:
+                chunks.append(message.result)
+        return "\n".join(chunks)
+
+    return asyncio.run(_invoke())
+
+
 _RUN_TARGETS = {
     "google-adk": _run_google_adk,
     "openai": _run_openai,
+    "claude": _run_claude,
 }
 
 

@@ -9,7 +9,7 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 - [x] **M3 — OpenAI Agents adapter** (hypothesis test PASSED: same `common/` builds on both SDKs; 53 tests)
 - [x] **M4 — CLI & docs** (`commonadk validate|render|run` + README; 64 tests passing)
 
-- [ ] **M5 — Claude Agent SDK adapter**
+- [x] **M5 — Claude Agent SDK adapter** (79 tests; hypothesis test now spans google-adk/openai/claude)
 - [ ] **M6 — CrewAI adapter**
 - [ ] **M7 — AutoGen adapter**
 - [ ] **M8 — LangGraph adapter**
@@ -36,3 +36,5 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-18 | Orchestrator | Reviewed M4: approved; independently reran suite (64 passing) and exercised the CLI (validate summary, unknown-target error, version); committed and pushed — v1 plan (M1–M4) complete |
 | 2026-08-18 | Sonnet 5 subagent | Wrote docs/: README (index), HLD.md, LLD.md, file-contracts.md — all cross-checked against source (field tables from pydantic models, error strings matched verbatim, examples copied from shipped project) |
 | 2026-08-18 | Orchestrator | Reviewed docs; fixed stale "once the CLI lands" note in mermaid.py's generated header (flagged by docs review) and regenerated example interaction-layer.md via `commonadk render`; committed and pushed |
+| 2026-08-18 | Sonnet 5 subagent | Implemented M5: ClaudeAgentSDKAdapter (ClaudeAgentOptions with flat subagent registry + Agent-tool edges, per-agent in-process MCP tool servers, anthropic-only model routing with clear error), CLI claude branch, example claude overrides, hypothesis test parametrized over 3 targets |
+| 2026-08-18 | Orchestrator | Reviewed M5: approved; verified subagent tool isolation, Agent-tool granted only to agents with outgoing edges, non-anthropic error path; 79 tests passing; committed and pushed |

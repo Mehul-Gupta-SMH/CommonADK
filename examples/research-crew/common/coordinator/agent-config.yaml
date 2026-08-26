@@ -15,3 +15,5 @@ requires:
 targets:
   google-adk: {}
   openai: {}
+  claude:
+    model: claude-sonnet-5

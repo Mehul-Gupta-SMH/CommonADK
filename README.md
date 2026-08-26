@@ -20,7 +20,8 @@ Install with the extra(s) for the SDK(s) you want to build against:
 ```bash
 pip install "commonadk[google]"   # Google ADK target
 pip install "commonadk[openai]"   # OpenAI Agents SDK target
-pip install "commonadk[google,openai]"   # both
+pip install "commonadk[claude]"   # Claude Agent SDK target
+pip install "commonadk[google,openai,claude]"   # all three
 ```
 
 Point it at the shipped example, a three-agent research crew
@@ -32,7 +33,12 @@ import commonadk
 project = commonadk.load("examples/research-crew/common")   # parse + validate
 agent = project.build("coordinator", target="google-adk")   # live google.adk.Agent
 agent = project.build("coordinator", target="openai")       # live agents.Agent
+options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
 ```
+
+(`target="claude"` needs each agent's `agent-config.yaml` to carry a
+`targets.claude.model` override, since the example's default models are
+gemini — see "Supported targets" below.)
 
 Or from the command line:
 
@@ -141,6 +147,7 @@ flowchart TD
 |---|---|---|---|
 | Google ADK | `google-adk` | bare model id when the LiteLLM string is `gemini/...` | `google.adk.models.lite_llm.LiteLlm` |
 | OpenAI Agents SDK | `openai` | bare model id when the LiteLLM string is `openai/...` | `agents.extensions.models.litellm_model.LitellmModel` |
+| Claude Agent SDK | `claude` | bare model id when the LiteLLM string is `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
 
 Every agent's `model:` (an alias from `config.yaml` or a raw LiteLLM string
 like `anthropic/claude-sonnet-5`) resolves the same way regardless of
@@ -149,6 +156,15 @@ natively or needs the SDK's own LiteLLM wrapper. A per-agent
 `targets.<sdk>.model` override in `agent-config.yaml` bypasses resolution
 entirely and is passed through as-is, for when you need an SDK-native model
 form commonadk doesn't infer.
+
+The Claude Agent SDK runs Anthropic models only — it has no LiteLLM wrapper
+at all, so an agent whose model resolves to any provider other than
+`anthropic/...` fails to build for `target="claude"` with a clear error
+naming the agent, its resolved model string, and how to fix it (an
+`anthropic/...` model, a different alias, or a `targets.claude.model`
+override). This is why research-crew's `agent-config.yaml` files each carry
+a `targets.claude.model: claude-sonnet-5` override — the project's default
+models are gemini.
 
 ## Delegate and handoff, per SDK
 
@@ -168,6 +184,24 @@ while the same shape can be legitimately rejected for Google ADK. (v1 does
 not yet distinguish `delegate` from `handoff` *within* either adapter — both
 edge types map to the one mechanism each SDK exposes today.)
 
+The Claude Agent SDK is session/query-based, not agent-object-based: instead
+of a live agent, `project.build(..., target="claude")` returns a
+`claude_agent_sdk.ClaudeAgentOptions` — the config object you pass to that
+SDK's `query()`. Its subagents (`options.agents`) are declared once, in a
+single **flat** `dict[str, AgentDefinition]`, not a nested tree — and per
+the SDK's own docs, any agent whose tools include the Agent tool can invoke
+*any* name in that flat registry, not just a parent-declared child. So this
+adapter registers every agent reachable from the build root (the whole
+transitive closure, however deep) into that one flat dict, and grants Agent
+tool access only to the reachable agents that actually have an outgoing
+edge in `interactions.yaml` — a deep edge (e.g. `researcher -> writer` when
+building `coordinator`) is fully representable this way, and — like OpenAI
+Agents' reference-based `handoffs` — a shared sub-agent or a cycle needs no
+special rejection either: the flat dict just holds one entry per logical
+agent name. See `adapters/claude_agent.py`'s module docstring for the full
+investigation and the tool-isolation mechanics (each agent's own
+`tools.py` functions become an in-process MCP server it alone can see).
+
 ## Roadmap
 
 CommonADK's plan and every settled design decision live in
@@ -175,4 +209,4 @@ CommonADK's plan and every settled design decision live in
 individual agents to different SDKs within one project — `agent-config.yaml`
 already reserves a `runtime:` key for this, unhonored in v1), richer edge
 semantics (pipelines, loops, shared state), and additional adapters
-(CrewAI, LangGraph, Claude Agent SDK, ...).
+(CrewAI, AutoGen, LangGraph, ...).
