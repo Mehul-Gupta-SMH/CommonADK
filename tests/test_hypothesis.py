@@ -3,7 +3,7 @@
 plan.md's bet is that `common/` can be the single source of truth: the same
 project builds, unmodified, on every supported SDK target. This test is
 that claim made executable -- it grows by one target per adapter milestone
-(M2: google-adk, M3: openai, M5: claude, M6: crewai) rather than living
+(M2: google-adk, M3: openai, M5: claude, M6: crewai, M7: autogen) rather than living
 duplicated inside each adapter's own test file, so the claim stays visible
 as one parametrized test instead of scattered assertions.
 
@@ -29,9 +29,21 @@ def tavily_env(monkeypatch):
     monkeypatch.delenv("POSTGRES_DSN", raising=False)
 
 
-@pytest.mark.parametrize("target", ["google-adk", "openai", "claude", "crewai"])
+@pytest.fixture()
+def provider_keys_env(monkeypatch):
+    """Fake provider API keys, only actually needed by the autogen target --
+    see autogen_adapter.py's module docstring, "Offline construction": its
+    model clients construct the underlying SDK client eagerly and raise if
+    no key is discoverable. Harmless to set for every other target's build
+    in this same parametrized test, since none of them read these vars."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test")
+
+
+@pytest.mark.parametrize("target", ["google-adk", "openai", "claude", "crewai", "autogen"])
 def test_same_project_builds_on_every_installed_target(
-    example_common_dir, tavily_env, target
+    example_common_dir, tavily_env, provider_keys_env, target
 ):
     # This is the v1 success criterion from plan.md ("Hypothesis"): the same
     # `common/` folder must build unmodified on every supported SDK target.
@@ -42,6 +54,7 @@ def test_same_project_builds_on_every_installed_target(
         "openai": "agents",
         "claude": "claude_agent_sdk",
         "crewai": "crewai",
+        "autogen": "autogen_agentchat",
     }[target]
     pytest.importorskip(importorskip_module)
 
@@ -57,10 +70,15 @@ def test_same_project_builds_on_every_installed_target(
     # -- see claude_agent.py's module docstring, "WHAT build() RETURNS";
     # CrewAI returns a `Crew` whose build-root agent is `.manager_agent`,
     # not a member of `.agents` -- see crewai_adapter.py's module
-    # docstring, "Manager-or-solo-member decision").
+    # docstring, "Manager-or-solo-member decision"; AutoGen returns a
+    # `Swarm` team here -- coordinator has an outgoing edge -- whose first
+    # participant is the build root, see autogen_adapter.py's module
+    # docstring, "WHAT build() RETURNS").
     if target == "claude":
         assert agent.system_prompt.strip() != ""
     elif target == "crewai":
         assert agent.manager_agent.role == "coordinator"
+    elif target == "autogen":
+        assert agent._participant_names[0] == "coordinator"
     else:
         assert agent.name == "coordinator"

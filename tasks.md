@@ -11,7 +11,7 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 
 - [x] **M5 — Claude Agent SDK adapter** (79 tests; hypothesis test now spans google-adk/openai/claude)
 - [x] **M6 — CrewAI adapter** (92 tests; hypothesis test spans 4 targets)
-- [ ] **M7 — AutoGen adapter**
+- [x] **M7 — AutoGen adapter** (107 tests; hypothesis test spans 5 targets)
 - [ ] **M8 — LangGraph adapter**
 
 ## Action log
@@ -40,3 +40,5 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-18 | Orchestrator | Reviewed M5: approved; verified subagent tool isolation, Agent-tool granted only to agents with outgoing edges, non-anthropic error path; 79 tests passing; committed and pushed |
 | 2026-08-19 | Sonnet 5 subagent | Implemented M6: CrewAIAdapter (always returns a Crew — hierarchical with root as manager_agent when reachable agents exist, solo sequential for leaves; LiteLLM-native model pass-through with temperature/max_tokens; crew-wide delegation coarsening documented; manager tools dropped with warning per CrewAI's own constraint), CLI crewai branch, 12 new tests |
 | 2026-08-19 | Orchestrator | Reviewed M6: approved; verified crew shapes, delegation flags, model routing live; noted pip dependency tension (crewai pins openai<3, openai-agents prefers >=3 — resolved to openai 2.54.0, all 92 tests still pass); committed and pushed |
+| 2026-08-19 | Sonnet 5 subagent | Implemented M7: AutoGenAdapter (Swarm of reachable agents with root as initial speaker, leaf builds return bare AssistantAgent; openai/anthropic/gemini model clients with explicit model_info to dodge autogen-ext's broken fuzzy model tables; string-name handoffs make multi-parent/cycles trivial), CLI autogen branch, 14 new tests |
+| 2026-08-19 | Orchestrator | Reviewed M7: approved; verified Swarm/leaf shapes and tool wiring live; example builds unmodified on autogen (no overrides needed); noted protobuf downgrade by autogen-core (suite unaffected); committed and pushed |

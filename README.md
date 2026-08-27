@@ -22,7 +22,8 @@ pip install "commonadk[google]"   # Google ADK target
 pip install "commonadk[openai]"   # OpenAI Agents SDK target
 pip install "commonadk[claude]"   # Claude Agent SDK target
 pip install "commonadk[crewai]"   # CrewAI target
-pip install "commonadk[google,openai,claude,crewai]"   # all four
+pip install "commonadk[autogen]"   # AutoGen target
+pip install "commonadk[google,openai,claude,crewai,autogen]"   # all five
 ```
 
 Point it at the shipped example, a three-agent research crew
@@ -36,6 +37,7 @@ agent = project.build("coordinator", target="google-adk")   # live google.adk.Ag
 agent = project.build("coordinator", target="openai")       # live agents.Agent
 options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
 crew = project.build("coordinator", target="crewai")         # live crewai.Crew
+team = project.build("coordinator", target="autogen")        # live autogen_agentchat.teams.Swarm
 ```
 
 (`target="claude"` needs each agent's `agent-config.yaml` to carry a
@@ -151,6 +153,7 @@ flowchart TD
 | OpenAI Agents SDK | `openai` | bare model id when the LiteLLM string is `openai/...` | `agents.extensions.models.litellm_model.LitellmModel` |
 | Claude Agent SDK | `claude` | bare model id when the LiteLLM string is `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
 | CrewAI | `crewai` | `crewai.LLM(model=...)` takes the resolved LiteLLM-format string **directly**, for every provider — no allowlist, no build-time error | routes to a native provider client when it recognizes one, else falls back to litellm's `completion()` itself |
+| AutoGen | `autogen` | bare model id for `openai/...`, `anthropic/...`, and `gemini/...` (native `autogen_ext` model clients) | **no LiteLLM path** — any other provider is a clear build-time error |
 
 Every agent's `model:` (an alias from `config.yaml` or a raw LiteLLM string
 like `anthropic/claude-sonnet-5`) resolves the same way regardless of
@@ -168,6 +171,12 @@ naming the agent, its resolved model string, and how to fix it (an
 override). This is why research-crew's `agent-config.yaml` files each carry
 a `targets.claude.model: claude-sonnet-5` override — the project's default
 models are gemini.
+
+AutoGen is similar in spirit: no LiteLLM path, but three native model
+clients (`openai/...`, `anthropic/...`, `gemini/...`) instead of one, so the
+shipped example builds unmodified with no `targets.autogen.model` overrides
+needed at all. Any other provider still fails to build with the same style
+of clear, actionable error.
 
 ## Delegate and handoff, per SDK
 
@@ -227,4 +236,4 @@ CommonADK's plan and every settled design decision live in
 individual agents to different SDKs within one project — `agent-config.yaml`
 already reserves a `runtime:` key for this, unhonored in v1), richer edge
 semantics (pipelines, loops, shared state), and additional adapters
-(AutoGen, LangGraph, ...).
+(LangGraph, ...).
