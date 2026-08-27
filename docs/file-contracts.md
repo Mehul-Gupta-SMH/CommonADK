@@ -58,19 +58,23 @@ folder (`validation._check_entry`).
 ```yaml
 name: research-crew
 entry: coordinator
-targets: [google-adk, openai]
+targets: [google-adk, openai, claude]
 default_model: fast
 model_aliases:
   fast: gemini/gemini-2.5-flash
   smart: anthropic/claude-sonnet-5
 ```
 
+(`targets:` here is purely informational — see the field table above; the
+project actually builds on all six supported targets, `claude` is just the
+one this list happens to call out.)
+
 ## `common/<agent>/agent-config.yaml` → `AgentConfig`
 
 | field | type | required | default | meaning |
 |---|---|---|---|---|
 | `name` | `str` | yes | — | must exactly match the containing folder's name |
-| `description` | `str` | no | `""` | short agent description; becomes ADK's `description` and OpenAI Agents' `handoff_description` (falls back to `None` there if empty) |
+| `description` | `str` | no | `""` | short agent description; becomes ADK's `description`, OpenAI Agents' `handoff_description` (falls back to `None` there if empty), Claude's `AgentDefinition.description`, CrewAI's `goal`, and AutoGen's `description` (unused by LangGraph, which has no equivalent per-agent description field) |
 | `model` | `str` | no | `None` | alias or LiteLLM string; falls back to `config.yaml`'s `default_model` when unset |
 | `model_params` | `dict[str, Any]` | no | `{}` | adapter-specific sampling params — see the per-adapter mapping tables below |
 | `tools` | `list[str]` | no | `[]` | function names that must exist in this agent's `tools.py` |
@@ -91,14 +95,48 @@ model_aliases:
 
 ### `targets:` — per-target overrides
 
-`targets` maps a target name (`"google-adk"`, `"openai"`) to an
-open-shaped dict. Today the only key either adapter reads is `model`: if
-present, it's passed through **verbatim** as the SDK-native model value,
-bypassing `Project.resolve_model` entirely (`_model_for` in both
-`adapters/google_adk.py` and `adapters/openai_agents.py`). Use it when you
-need an SDK-native model form commonadk's LiteLLM-based resolution can't
-express. An empty `{}` for a target (as both `coordinator` and `writer` use
-below) is a no-op — resolution proceeds normally.
+`targets` maps a target name to an open-shaped dict. Valid target names are
+the six known to `adapters/__init__.py`'s registry: `"google-adk"`,
+`"openai"`, `"claude"`, `"crewai"`, `"autogen"`, `"langgraph"` (any string
+is accepted at the schema level — `targets` is `dict[str, dict[str, Any]]`
+with no key-name validation — but only these six are ever read by an
+adapter; anything else is simply inert). The only key any adapter reads
+today is `model`: if present, it's passed through **verbatim**, bypassing
+`Project.resolve_model` entirely (every adapter's `_model_for` /
+`_llm_for` / `_client_for` checks `spec.config.targets.get("<target>",
+{})` first, before falling back to resolution). Use it when you need an
+SDK-native model form commonadk's LiteLLM-based resolution can't express.
+An empty `{}` for a target (as `coordinator`'s `google-adk`/`openai`
+entries do above) is a no-op — resolution proceeds normally.
+
+**The override's expected form is not the same string shape across all six
+targets** — each adapter treats it as "already correct for this SDK" and
+passes it straight through with zero parsing, so the form that's actually
+correct depends entirely on what that one target's constructor expects,
+verified directly against each adapter's `_model_for`/`_llm_for`/
+`_client_for`:
+
+| Target | `targets.<target>.model` expected form | Example |
+|---|---|---|
+| `google-adk` | bare SDK-native model id (Gemini) or an SDK model-wrapper value | `gemini-2.5-flash` |
+| `openai` | bare SDK-native model id (OpenAI) | `gpt-4o` |
+| `claude` | bare Anthropic model id **or** the SDK's own alias (`"sonnet"`, `"opus"`, `"haiku"`, `"inherit"`) | `claude-sonnet-5` |
+| `autogen` | bare model id, passed to the *default* `OpenAIChatCompletionClient` with **no** explicit `model_info` (must already be a model that client's own table recognizes) | `gpt-4o` |
+| `crewai` | a **LiteLLM-format string** (`"provider/model-id"`) — `crewai.LLM(model=...)` parses this itself, so the override doesn't need to be "SDK-native" the way it does for other targets | `anthropic/claude-opus-4` |
+| `langgraph` | a **langchain-native `"provider:model"` string** (colon, not slash — `init_chat_model`'s own convention), *not* a bare id and *not* a LiteLLM `"provider/model"` string | `anthropic:claude-opus-4` |
+
+Four of the six (`google-adk`, `openai`, `claude`, `autogen`) expect a bare,
+SDK-native model identifier — no provider prefix at all. `crewai` is the
+one target whose override form is the *same* shape as an ordinary,
+un-overridden `model:` value (a LiteLLM `"provider/model"` string), since
+`crewai.LLM` speaks that format natively either way. `langgraph` is the one
+target with a third, distinct shape — colon-separated, langchain's own
+convention — that looks similar to but is not interchangeable with either
+of the other two forms. Getting this wrong doesn't fail silently: each
+SDK's own constructor raises its own error for a string it doesn't
+recognize (e.g. `init_chat_model` raising because `"gemini/gemini-2.5-pro"`
+doesn't split on `:` the way it expects), unwrapped and un-reworded by
+commonadk.
 
 ### `runtime:` — reserved key
 
@@ -118,7 +156,8 @@ agent's `tools.py`, with a docstring and full parameter type hints
 `default_model`) must be resolvable, same rule as `config.yaml`
 (`validation._check_models`).
 
-**Example, no per-agent overrides needed** (`.../coordinator/agent-config.yaml`):
+**Example, one real per-target override — `claude` needs it, `google-adk`/`openai` don't**
+(`.../coordinator/agent-config.yaml`):
 
 ```yaml
 name: coordinator
@@ -138,7 +177,16 @@ requires:
 targets:
   google-adk: {}
   openai: {}
+  claude:
+    model: claude-sonnet-5
 ```
+
+`fast` resolves to `gemini/gemini-2.5-flash` — a provider both `google-adk`
+(native) and `openai` (LiteLLM-wrapped) can build, so their `{}` entries
+are no-ops. The Claude Agent SDK has no LiteLLM path at all and only
+speaks Anthropic natively, so `target="claude"` needs the override above
+to build this agent; every shipped agent in this example carries the same
+`claude.model: claude-sonnet-5` override for exactly that reason.
 
 **Example, full contract in use — explicit model, `model_params`, required
 and optional env vars, and a real per-target override**
@@ -170,13 +218,19 @@ targets:
   google-adk:
     model: gemini-2.5-flash
   openai: {}
+  claude:
+    model: claude-sonnet-5
 ```
 
 Here, on `target="google-adk"` this agent builds with the *bare* model id
 `gemini-2.5-flash` (the override), not the resolved
 `gemini/gemini-2.5-pro`; on `target="openai"` the `openai: {}` override is
 a no-op, so `gemini/gemini-2.5-pro` resolves normally and gets wrapped in
-`LitellmModel` (non-`openai` provider).
+`LitellmModel` (non-`openai` provider); on `target="claude"` the
+`claude.model: claude-sonnet-5` override is required — `researcher`'s
+resolved model is a `gemini/...` string, and the Claude Agent SDK has no
+LiteLLM fallback, so without this override the build fails with a clear
+`ValueError` naming the agent and its unsupported resolved model.
 
 ### `model_params` — what each adapter actually maps
 
@@ -184,18 +238,29 @@ a no-op, so `gemini/gemini-2.5-pro` resolves normally and gets wrapped in
 adapter maps a fixed, small set of keys and warns (does not error) on
 anything else:
 
-| `model_params` key | Google ADK maps to | OpenAI Agents maps to |
-|---|---|---|
-| `temperature` | `GenerateContentConfig.temperature` | `ModelSettings.temperature` |
-| `max_tokens` | `GenerateContentConfig.max_output_tokens` | `ModelSettings.max_tokens` |
-| anything else | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time |
+| `model_params` key | Google ADK | OpenAI Agents | Claude Agent SDK | CrewAI | AutoGen | LangGraph |
+|---|---|---|---|---|---|---|
+| `temperature` | `GenerateContentConfig.temperature` | `ModelSettings.temperature` | *(none supported)* | `LLM(temperature=...)` | `temperature` client kwarg | `init_chat_model(temperature=...)` |
+| `max_tokens` | `GenerateContentConfig.max_output_tokens` | `ModelSettings.max_tokens` | *(none supported)* | `LLM(max_tokens=...)` | `max_tokens` client kwarg | `init_chat_model(max_tokens=...)` |
+| anything else | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time |
+
+The Claude Agent SDK exposes no per-request sampling controls analogous to
+`temperature`/`max_tokens` anywhere in `claude_agent_sdk.types` (verified
+directly — its closest fields, `thinking`/`effort`/`max_thinking_tokens`/
+`max_turns`, are reasoning-effort and turn-budget controls, not sampling
+parameters), so **every** `model_params` key is warned-and-ignored for that
+target, not just the ones outside this table.
 
 ## `common/<agent>/skill.md`
 
 Plain Markdown, passed through as the agent's system instructions
-(`AgentSpec.instructions`) — `Agent(..., instruction=...)` for Google ADK,
-`Agent(..., instructions=...)` for OpenAI Agents. Required: `loader.load`
-appends a `ValidationError` if the file is missing.
+(`AgentSpec.instructions`) — each adapter's own field name for "the
+system prompt" differs, but all six read this same string: `instruction=`
+(Google ADK), `instructions=` (OpenAI Agents), `system_prompt=`
+(Claude Agent SDK's root, `prompt=` on its `AgentDefinition` subagents),
+`backstory=` (CrewAI), `system_message=` (AutoGen), `system_prompt=`
+(LangGraph's `create_agent`). Required: `loader.load` appends a
+`ValidationError` if the file is missing.
 
 **Frontmatter rule**: an optional YAML frontmatter block — `---`, then
 YAML, then `---` — is recognized **only when it is the very first thing in
@@ -257,10 +322,21 @@ also harmless, just introspected and then unused).
   (`return_type is None`).
 
 Type hints and the docstring are exactly what every adapter turns into
-that SDK's native tool schema: Google ADK passes the bare function through
-(`tools=[tool.func for tool in spec.tools]` — ADK's own `Agent` introspects
-it); OpenAI Agents wraps it with `agents.function_tool(tool.func)`, which
-does its own introspection of the same signature and docstring.
+that SDK's native tool schema. Three adapters pass the bare function
+straight through and let the SDK introspect it itself: Google ADK
+(`tools=[tool.func for tool in spec.tools]`), AutoGen
+(`AssistantAgent(tools=[t.func for t in spec.tools])`, wrapped internally
+with `autogen_core.tools.FunctionTool`), and LangGraph
+(`create_agent(..., tools=[t.func for t in spec.tools] + handoff_tools)`,
+wrapped internally into a `StructuredTool`). Three wrap it with the SDK's
+own decorator/builder first: OpenAI Agents (`agents.function_tool(tool.func)`),
+CrewAI (`crewai.tools.tool(tool.func)`), and the Claude Agent SDK, which
+builds a JSON Schema from `ToolSpec.parameters` itself and wraps the
+function as an async handler registered on an in-process MCP server
+(`claude_agent_sdk.tool(...)` + `create_sdk_mcp_server(...)`) — the only
+adapter that doesn't lean on the target SDK's own signature introspection
+for tools, since this SDK's tool mechanism is schema-first, not
+introspection-first.
 
 **Example** (`.../researcher/tools.py`):
 
@@ -332,18 +408,27 @@ actually exists (a real folder with a matching `agent-config.yaml`) —
 file's) must also name a real agent, and if both files set `entry` they
 must agree — `validation._check_entry`.
 
-**Semantics, per target** (detail: [`HLD.md`](HLD.md#the-structural-asymmetry-between-targets)):
-both edge types map to the *one* routing mechanism each SDK exposes today
-— ADK `sub_agents`, OpenAI Agents `handoffs` — so v1 does not yet build
-different structures for `delegate` vs. `handoff`. The distinction is
-preserved in the schema for a future adapter/SDK capability to honor.
-Because Google ADK's `sub_agents` are a strict tree, the subgraph reachable
-from whichever agent you `build()` must itself be a tree — no agent
-reachable from two parents, no cycles — or `GoogleADKAdapter` raises before
-constructing anything. The OpenAI Agents adapter has no such restriction.
+**Semantics, per target** (full detail:
+[`HLD.md`](HLD.md#comparing-the-six-targets)): both edge types map to the
+*one* routing mechanism each of the six SDKs exposes today, so v1 does not
+yet build different structures for `delegate` vs. `handoff`. The
+distinction is preserved in the schema for a future adapter/SDK capability
+to honor. How faithfully an edge's *target* survives translation is a
+spectrum, not uniform: LangGraph represents it precisely (one
+individually-named handoff tool per edge); OpenAI Agents and AutoGen
+represent it as a per-agent reference (a live object, or a name string)
+with no restriction on multi-parent graphs or cycles; the Claude Agent SDK
+registers every reachable agent in one flat registry and gates delegation
+access per-agent by outgoing edge; Google ADK's `sub_agents` are a strict
+**tree** — the subgraph reachable from whichever agent you `build()` must
+itself be a tree, no agent reachable from two parents, no cycles, or
+`GoogleADKAdapter` raises before constructing anything; CrewAI's
+delegation is crew-wide, so an edge's *target* isn't representable at all
+there — only *whether* an agent can delegate is.
 
 **Example** (`examples/research-crew/common/interactions.yaml` — a clean
-tree, buildable on both targets):
+tree, buildable on all six targets, including Google ADK's strict-tree
+constraint):
 
 ```yaml
 entry: coordinator

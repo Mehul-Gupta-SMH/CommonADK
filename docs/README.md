@@ -8,16 +8,17 @@ complements, rather than replaces, the docs at the repo root.
 
 | Doc | Covers |
 |---|---|
-| [`HLD.md`](HLD.md) | High-level design: the hypothesis, system architecture, component responsibilities, key design decisions with rationale, and the structural asymmetry between Google ADK's `sub_agents` tree and the OpenAI Agents SDK's `handoffs` graph — the flagship design insight |
-| [`LLD.md`](LLD.md) | Low-level design: module-by-module contracts for every file in `src/commonadk/` — models, loader pipeline, validation checks, mermaid rendering, both adapters, the CLI, the full error taxonomy, and what each test file covers |
-| [`file-contracts.md`](file-contracts.md) | The authoritative reference for authoring a `common/` folder — every file's field table (name, type, required, default, meaning), validation rules, and a fully annotated example drawn from the shipped project |
+| [`HLD.md`](HLD.md) | High-level design: the hypothesis, system architecture, component responsibilities, key design decisions with rationale, and a comparison of all six supported targets — the spectrum of edge-semantics fidelity from LangGraph's precise per-edge handoff tools down to CrewAI's crew-wide delegation — the flagship design insight |
+| [`LLD.md`](LLD.md) | Low-level design: module-by-module contracts for every file in `src/commonadk/` — models, loader pipeline, validation checks, mermaid rendering, all six adapters, the CLI, the full error taxonomy, and what each test file covers |
+| [`file-contracts.md`](file-contracts.md) | The authoritative reference for authoring a `common/` folder — every file's field table (name, type, required, default, meaning), validation rules, per-target `model` override forms, and a fully annotated example drawn from the shipped project |
 
 Outside this folder:
 
 - [`../README.md`](../README.md) — quickstart: install, load the shipped
-  example, `commonadk validate|render|run`.
+  example, `commonadk validate|render|run` against any of the six
+  supported targets.
 - [`../plan.md`](../plan.md) — planning and roadmap: the settled design
-  decisions, milestones (M1–M4), and what's deliberately deferred (mixed-
-  target spawning, richer edge semantics, more adapters).
+  decisions, milestones (M1–M8, covering the six adapters), and what's
+  deliberately deferred (mixed-target spawning, richer edge semantics).
 - [`../tasks.md`](../tasks.md) — the action log: what was built, reviewed,
   and shipped, milestone by milestone.

@@ -21,7 +21,11 @@ src/commonadk/
     ├── __init__.py         # target -> adapter registry, lazy SDK imports
     ├── base.py               # BaseAdapter ABC + shared env-preflight/BFS
     ├── google_adk.py           # AgentSpec -> google.adk.agents.Agent
-    └── openai_agents.py         # AgentSpec -> agents.Agent
+    ├── openai_agents.py         # AgentSpec -> agents.Agent
+    ├── claude_agent.py           # AgentSpec -> claude_agent_sdk.ClaudeAgentOptions
+    ├── crewai_adapter.py          # AgentSpec -> crewai.Crew
+    ├── autogen_adapter.py          # AgentSpec -> AssistantAgent / Swarm
+    └── langgraph_adapter.py         # AgentSpec -> compiled langgraph StateGraph
 ```
 
 `__init__.py` re-exports everything a caller needs without reaching into
@@ -319,14 +323,11 @@ fence. The header text is:
 ```
 <!-- GENERATED FILE -- do not edit by hand.
      Regenerate with `commonadk.mermaid.write_interaction_layer`
-     (or `commonadk render`, once the CLI lands) from interactions.yaml. -->
+     (or `commonadk render`) from interactions.yaml. -->
 ```
 
 This is verbatim what ships in `mermaid.py` and in the committed
-`examples/research-crew/common/interaction-layer.md` — note the parenthetical
-still reads "once the CLI lands" even though `commonadk render` (`cli.py`)
-has existed since M4; it's a stale comment carried over from before the CLI
-landed, not a sign the CLI is missing.
+`examples/research-crew/common/interaction-layer.md`.
 
 ## `adapters/`
 
@@ -371,12 +372,16 @@ raises.
 ### `adapters/__init__.py` — registry
 
 `_REGISTRY: dict[str, tuple[str, str, str]]` maps target name to `(module
-path, class name, pip extra)`:
+path, class name, pip extra)` — six entries:
 
 | target | module | class | extra |
 |---|---|---|---|
 | `"google-adk"` | `commonadk.adapters.google_adk` | `GoogleADKAdapter` | `google` |
 | `"openai"` | `commonadk.adapters.openai_agents` | `OpenAIAgentsAdapter` | `openai` |
+| `"claude"` | `commonadk.adapters.claude_agent` | `ClaudeAgentSDKAdapter` | `claude` |
+| `"crewai"` | `commonadk.adapters.crewai_adapter` | `CrewAIAdapter` | `crewai` |
+| `"autogen"` | `commonadk.adapters.autogen_adapter` | `AutoGenAdapter` | `autogen` |
+| `"langgraph"` | `commonadk.adapters.langgraph_adapter` | `LangGraphAdapter` | `langgraph` |
 
 **`get_adapter(target) -> BaseAdapter`** — two error modes:
 
@@ -519,6 +524,433 @@ Unlike `_generate_content_config`, this always returns a `ModelSettings(...)`
 instance (constructed even with an empty `kwargs`), never `None` —
 `ModelSettings()` with no args is `agents`'s own default.
 
+### `claude_agent.py` — `ClaudeAgentSDKAdapter`
+
+`target = "claude"`. Verified against claude-agent-sdk 0.2.144.
+
+**What `build()` returns**: unlike every adapter above, this SDK has no
+persistent "agent object" — it's session/query-based, driven by a
+`claude_agent_sdk.query(prompt=..., options=...)` call. So `build()`
+returns a fully-wired `claude_agent_sdk.ClaudeAgentOptions`: the requested
+agent's `instructions` as `system_prompt`, its resolved model as `model`,
+its own `tools.py` functions registered as an in-process MCP server, and
+every other reachable agent wired into `options.agents` as
+`claude_agent_sdk.AgentDefinition` subagents.
+
+**`build(project, agent_name)`**:
+
+1. `self._check_env(...)`, then `reachable = self._reachable_agents(...)`
+   (includes `agent_name`) and `has_children[name]` — whether `name` has
+   any outgoing edge.
+2. For every reachable agent with `spec.tools`: wraps each `ToolSpec` with
+   `claude_agent_sdk.tool(name, description, input_schema)` (a JSON Schema
+   built from `ToolSpec.parameters`, `_JSON_SCHEMA_TYPE` mapping
+   `str/int/float/bool` → `string/integer/number/boolean`, anything else
+   falling back to `"string"`), bundles them into one
+   `create_sdk_mcp_server(name=f"{name}_tools", tools=[...])`, and records
+   its own tool names as `f"mcp__{name}_tools__{tool.name}"`. An agent with
+   no tools gets an empty own-tool-names list and no server.
+3. Builds `options.agents`: one `AgentDefinition` per reachable agent
+   *other than* `agent_name` itself (the root isn't a subagent of itself —
+   it *is* `options`), each with `tools = own_tool_names[name] +
+   (["Agent"] if has_children[name] else [])` and `mcpServers =
+   [f"{name}_tools"]` if it has tools, else `[]`.
+4. Builds the root's own tool list the same way (`root_tools`, with
+   `"Agent"` appended iff the root has outgoing edges) and a `disallowed`
+   list — every *other* reachable agent's own `mcp__..__` tool names —
+   removed from the root's built-in-tool surface.
+5. Returns:
+
+   ```python
+   ClaudeAgentOptions(
+       system_prompt=root_spec.instructions,
+       model=self._model_for(project, root_spec),
+       tools=[],                       # no built-in Claude Code tools
+       allowed_tools=root_tools,
+       disallowed_tools=disallowed,
+       mcp_servers=mcp_servers,
+       agents=agents,
+   )
+   ```
+
+**Flat subagent registry, gated by edges** — the notable verified upstream
+constraint: `AgentDefinition` has no nested "agents" field of its own —
+subagents live in one flat `dict[str, AgentDefinition]` on
+`ClaudeAgentOptions`. Per the SDK's docs
+(`code.claude.com/docs/en/agent-sdk/subagents`), any agent whose `tools`
+includes `"Agent"` can invoke *any* name in that flat registry via the
+Agent tool's `subagent_type` argument — a lookup against the whole
+registry, not scoped to a parent-declared child list (subagents can spawn
+subagents up to `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, default 3). So a
+deep `interactions.yaml` edge (e.g. `researcher -> writer` when building
+`coordinator`) is honestly representable: every reachable agent (the full
+transitive closure) is registered, and `"Agent"` access is granted only to
+agents that actually have an outgoing edge — delegation happens exactly
+where the graph says it can, even though the underlying lookup mechanism
+is more permissive. This also means multi-parent graphs and cycles need no
+special handling: `options.agents` is a plain dict keyed by logical agent
+name, so a name reached by two paths, or a cycle back to the build root
+(excluded from `options.agents` since it *is* `options`), is simply the
+same dict entry, or a no-op.
+
+**Tool restriction detail**: `AgentDefinition.tools`, when set, is a
+restrictive allowlist (not additive to some base set — the SDK's own docs
+say an *omitted* `tools` field inherits everything). `ClaudeAgentOptions`
+has no equivalent restrictive field for the main session, so the build
+root is restricted differently: `tools=[]` turns off every built-in Claude
+Code tool (Read/Write/Bash/...; commonadk agents are pure custom-tool
+agents), and `disallowed_tools` explicitly strips every other reachable
+agent's own `mcp__..__` names from the root's visibility — `disallowed_tools`
+actually removes a tool from the model's context, unlike `allowed_tools`,
+which only pre-approves without restricting.
+
+**Model routing (`_model_for`)**: Anthropic-native only — no LiteLLM path
+exists anywhere in this SDK. `targets.claude.model` override wins verbatim
+(already SDK-native — a bare model id or alias like `"sonnet"`, `"opus"`,
+`"haiku"`, `"inherit"`). Else, `resolved = project.resolve_model(spec.name)`;
+if the provider is `"anthropic"`, return the bare id after the `/`.
+Otherwise raises:
+
+```
+ValueError(
+    f"commonadk: agent {spec.name!r} resolves to model {resolved!r}, "
+    f"but the Claude Agent SDK target ('claude') runs Anthropic "
+    f"models only -- there is no LiteLLM path for this target. Fix "
+    f"this by either: using an 'anthropic/...' model (e.g. "
+    f"'anthropic/claude-sonnet-5'), changing {spec.name}'s model "
+    f"alias in config.yaml to one that resolves to an "
+    f"'anthropic/...' string, or adding a `targets.claude.model` "
+    f"override to {spec.name}/agent-config.yaml with an SDK-native "
+    f"model id or alias (e.g. 'claude-sonnet-5', 'sonnet', 'opus', "
+    f"'haiku')."
+)
+```
+
+This is why the shipped research-crew example (gemini-default models)
+needs `targets.claude.model: claude-sonnet-5` added to every agent to build
+for this target at all — verified and tested
+(`test_shipped_example_without_claude_overrides_fails_with_clear_error`,
+`tests/test_adapter_claude.py`).
+
+**`model_params`**: `_MODEL_PARAM_MAP = {}` — this SDK exposes no
+per-request sampling controls analogous to `temperature`/`max_tokens`
+anywhere in `claude_agent_sdk.types` (grepped directly; the closest fields,
+`thinking`/`effort`/`max_thinking_tokens`/`max_turns`, are reasoning-effort
+and turn-budget controls, not sampling params). Every `model_params` key is
+therefore warned-and-ignored, unconditionally.
+
+**Warn-vs-error**: model-provider mismatch is the only hard error (build
+root and every reachable agent must resolve to `anthropic/...` or carry a
+`targets.claude.model` override); every `model_params` key is a warning,
+same policy as every other adapter.
+
+### `crewai_adapter.py` — `CrewAIAdapter`
+
+`target = "crewai"`. Verified against crewai 1.15.16.
+
+**What `build()` returns**: a live `crewai.Crew` with `tasks=[]` (verified
+directly: `Crew(agents=[...], tasks=[], process=...)` constructs
+successfully with an empty task list — a `Task` needs a
+`description`/`expected_output` that only exist once the caller knows the
+real prompt, which is `commonadk run`'s job, not `build()`'s). The caller
+supplies the one `Task` at kickoff time.
+
+**`build(project, agent_name)`**:
+
+1. `self._check_env(...)`; `reachable = self._reachable_agents(...)`;
+   `has_outgoing[name]` per reachable agent; `member_names = reachable
+   minus agent_name`; `is_manager = bool(member_names)`.
+2. Builds the root agent (`allow_delegation=has_outgoing[agent_name],
+   as_manager=is_manager`).
+3. If not `is_manager` (the root has no reachable agents — a leaf built
+   directly, e.g. `writer` in the shipped example): returns
+   `Crew(agents=[root_agent], tasks=[], process=Process.sequential)` — the
+   solo-member fallback (an empty, non-manager `agents=[]` combined with
+   `tasks=[]` is rejected by a different pydantic validator, so this
+   fallback, not an empty crew, is the only viable shape).
+4. Else: builds every other member (`allow_delegation=has_outgoing[name],
+   as_manager=False`) and returns `Crew(agents=members, tasks=[],
+   process=Process.hierarchical, manager_agent=root_agent)`.
+
+**Manager-tools constraint** (`_build_agent`): `Crew._create_manager_agent`
+(called at `kickoff()`, not `build()`) raises `"Manager agent should not
+have tools"` if the manager has any. So when this adapter builds
+`agent_name` into the manager role, it forces `tools=[]` regardless of
+`agent-config.yaml`, and **warns** if that agent actually declared tools —
+they'd otherwise be silently unusable there, and `kickoff()` would
+hard-crash. This only affects the root when it becomes manager; every
+other crew member (and the root itself when it's the solo sequential
+member) keeps its own tools.
+
+**Edge mapping — coarsened, verified not assumed**: both `delegate` and
+`handoff` map to CrewAI's one delegation mechanism
+(`allow_delegation=True`), which is **crew-wide**:
+`Crew._add_delegation_tools` targets `[agent for agent in self.agents if
+agent != task.agent]` — every *other* crew member, with no concept of "only
+the agents `interactions.yaml` points this agent at." So edge *targets*
+are not representable here. What the graph still controls: (1) *whether*
+an agent can delegate at all (`allow_delegation=True` only for agents with
+≥1 outgoing edge); (2) *scope* (only agents reachable from the build root
+join the crew via `_reachable_agents`). Multi-parent graphs and cycles need
+no special handling — `crew.agents` is a flat, already-deduped list, so a
+shared or cyclic destination is simply the same `Agent` instance appearing
+once.
+
+**AgentSpec mapping**: `role=spec.name`, `goal=spec.config.description`,
+`backstory=spec.instructions` — `role` is CrewAI's only identifying string
+field, mirroring `name` elsewhere; `goal` mirrors `description`; `backstory`
+is where CrewAI expects an agent's persona/instructions, mirroring
+`instructions` elsewhere.
+
+**Model routing (`_llm_for`)**: `targets.crewai.model` override wins
+verbatim; else `model = project.resolve_model(spec.name)` (LiteLLM-format).
+Either way, `LLM(model=model, **model_param_kwargs)` — `crewai.LLM.__new__`
+is a factory that parses the `"provider/..."` prefix itself, routing known
+providers (openai, anthropic, azure, bedrock, gemini, openrouter,
+deepseek, ollama, cerebras, ...) to a native client and falling back to
+litellm's `completion()` for everything else. **No unsupported-provider
+error exists for this target** — the one adapter in this codebase where
+every LiteLLM-format string just works.
+
+**`model_params` → `LLM` kwargs**: `_MODEL_PARAM_MAP = {"temperature":
+"temperature", "max_tokens": "max_tokens"}` — real constructor fields on
+`crewai.LLM` (and every native provider subclass it resolves to). Anything
+else (e.g. `top_p`, which `LLM` also exposes but this adapter doesn't wire
+up) is warned-and-ignored.
+
+**Tool wiring**: `crewai.tools.tool(func)` — the SDK's own decorator,
+builds a pydantic `args_schema` from the function signature; no extra
+name/description plumbing needed since `tool_spec.name` is always
+`func.__name__`, which is exactly what the decorator derives its name from.
+
+**Telemetry**: CrewAI ships opt-out telemetry, gated dynamically (not just
+at import) by `CREWAI_DISABLE_TELEMETRY`/`OTEL_SDK_DISABLED`/
+`CREWAI_DISABLE_TRACKING`. `build()` itself never emits telemetry
+(`kickoff()` does); the test suite sets those env vars anyway for
+belt-and-suspenders offline safety.
+
+**Warn-vs-error**: only the manager-tools case is a warning (tools
+silently dropped, not an error) — there is no unsupported-provider or
+unsupported-graph-shape error at all for this target; every reachable
+agent always builds.
+
+### `autogen_adapter.py` — `AutoGenAdapter`
+
+`target = "autogen"`. Targets Microsoft's current stack
+(`autogen-agentchat`/`autogen-core`/`autogen-ext`, 0.4+) — **not** the
+community `ag2` fork, an unrelated API despite the shared origin. Verified
+against autogen-agentchat/-core/-ext 0.7.5.
+
+**What `build()` returns**: real persistent `AssistantAgent` objects (like
+Google ADK and OpenAI Agents), each wired with a `model_client`, its own
+`tools.py` functions, and a `handoffs: list[str]`. But a lone
+`AssistantAgent`'s handoffs only do anything inside a *team* — verified
+directly: a bare `AssistantAgent.run()` answers once and never consults
+`.handoffs`. So `build()` picks its return shape based on the root:
+
+- No outgoing edges (a leaf, e.g. `writer`): returns the bare
+  `AssistantAgent` — nothing to route to.
+- ≥1 outgoing edge: returns a ready-to-run `autogen_agentchat.teams.Swarm`
+  whose `participants` are every reachable agent, build root first
+  (`_reachable_agents` already returns it at index 0, exactly what `Swarm`
+  requires as the initial speaker).
+
+**`build(project, agent_name)`**: builds one `AssistantAgent` per reachable
+name (`handoffs = [edge.to for edge in project.graph.edges if edge.from_
+== name]`, plain strings), then branches on `has_outgoing` as above,
+setting `max_turns=len(reachable)` on any `Swarm` it returns.
+
+**`max_turns` heuristic — a documented v1 limitation, not an SDK
+requirement**: with no `termination_condition`/`max_turns`, a `Swarm` "runs
+indefinitely" per its own docs — `max_turns`/`termination_condition` are
+constructor-only, no per-call override exists on `run`/`run_stream`. Since
+`commonadk run` needs one execution that reliably terminates,
+`max_turns=len(reachable)` gives exactly enough speaker-turns for one full
+pass down a linear chain; it's a heuristic for branchier graphs
+(multi-parent, cycles), not a guarantee.
+
+**Handoff targets are name strings, not references** — the notable
+verified property: `AssistantAgent.__init__` accepts `handoffs:
+List[HandoffBase | str] | None`, wrapping a bare `str` as
+`HandoffBase(target=that_string)`; `Swarm` resolves those names against its
+own `participants` by name at run time, with no parent-tracking anywhere in
+construction. This makes multi-parent graphs and cycles even more trivially
+fine than OpenAI Agents' memoized-reference approach: one `AssistantAgent`
+per logical name (memoized), each `handoffs` list just plain strings — no
+recursion hazard at all, since a name reference carries none.
+
+**Model routing (`_client_for`)** — three native providers, everything
+else a clear error:
+
+- `openai/<model>` → `OpenAIChatCompletionClient(model=<bare id>)`.
+- `anthropic/<model>` → `AnthropicChatCompletionClient(model=<bare id>,
+  model_info=_ANTHROPIC_MODEL_INFO)`. **Verified landmine**: this client's
+  bundled model table only knows a handful of dated hardcoded ids and falls
+  back to buggy prefix-matching otherwise — `"claude-sonnet-5"` silently
+  matches a legacy `claude-2.0` table entry (`function_calling: False`),
+  which then makes `AssistantAgent.__init__` raise "The model does not
+  support function calling" as soon as tools/handoffs are passed. This
+  adapter always passes an explicit `model_info`
+  (`function_calling: True, family: ModelFamily.UNKNOWN`) to bypass the
+  stale table entirely.
+- `gemini/<model>` → also `OpenAIChatCompletionClient(model=<bare id>,
+  model_info=_GEMINI_MODEL_INFO)`. No separate native Gemini client exists
+  in `autogen_ext.models`; `OpenAIChatCompletionClient.__init__` itself
+  special-cases a `"gemini-"`-prefixed model name, pointing `base_url` at
+  Gemini's OpenAI-compatible endpoint and reading `GEMINI_API_KEY`. Its
+  bundled table is *incomplete* (`gemini-2.5-pro`, used by the shipped
+  example's `researcher`, isn't in it), so this adapter always supplies
+  explicit `model_info` here too — the base-url/api-key special-casing
+  still runs regardless.
+- Per-target override (`targets.autogen.model`): passed to
+  `OpenAIChatCompletionClient(model=override, **kwargs)` with **no**
+  explicit `model_info` — assumed to already be a model that client's own
+  table recognizes.
+- Anything else (azure, bedrock, ollama, cohere, mistral, ...): clear
+  `ValueError` naming the agent, its resolved model, and the fix options.
+
+No override is needed for the shipped research-crew example — `fast`
+(gemini), `smart` (anthropic), and researcher's own gemini model are all
+covered by the native paths above.
+
+**`model_params`**: `_MODEL_PARAM_MAP = {"temperature": "temperature",
+"max_tokens": "max_tokens"}` — both native clients accept these directly
+(`TypedDict` `CreateArguments` fields, shared shape). Anything else is
+warned-and-ignored.
+
+**Tool wiring**: `AssistantAgent(tools=[...])` accepts plain callables
+directly — it wraps each with `autogen_core.tools.FunctionTool` itself. So
+`[t.func for t in spec.tools]` passes straight through, no wrapping needed.
+
+**Offline construction — a real difference from Google ADK/OpenAI
+Agents/CrewAI/Claude**: `OpenAIChatCompletionClient`/
+`AnthropicChatCompletionClient.__init__` eagerly construct the underlying
+`openai.AsyncOpenAI`/`anthropic.AsyncAnthropic` client right there in
+`build()`, raising immediately (`openai.OpenAIError: "Missing
+credentials..."`) if no `api_key` kwarg is given and the matching env var
+(`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY`) isn't set — verified
+directly with the vars cleared. `requires.env` has never covered
+model-provider auth (it's for an agent's own tool-level vars); this is the
+SDK's own eagerness, unwrapped. Tests set fake key-shaped values up front
+for exactly this reason (`test_adapter_autogen.py`'s `provider_keys_env`
+fixture) — no network call is ever made.
+
+**Warn-vs-error**: unsupported provider is a hard `ValueError`; every
+`model_params` key outside the map is a warning; a missing provider API
+key is the SDK's own unwrapped `OSError`/`openai.OpenAIError`, surfaced
+as-is, not an adapter-specific error.
+
+### `langgraph_adapter.py` — `LangGraphAdapter`
+
+`target = "langgraph"`. Verified against langgraph 1.2.11, langchain
+1.3.17, langchain-core 1.6.0, langchain-google-genai 4.3.6,
+langchain-anthropic 1.6.1, langchain-openai 1.6.0.
+
+**What `build()` returns**: every reachable agent is its own prebuilt
+react agent — a `CompiledStateGraph` from `langchain.agents.create_agent`
+(the *current* idiomatic entry point; the older
+`langgraph.prebuilt.create_react_agent` still works in this stack but emits
+a `LangGraphDeprecatedSinceV10` warning, verified directly, so this adapter
+uses `create_agent` throughout).
+
+- No outgoing edges (a leaf, e.g. `writer`): returns that agent's own
+  compiled react graph directly.
+- ≥1 outgoing edge: every reachable agent is built the same way, each
+  wired with one handoff tool per outgoing edge (see below), and all of
+  them become nodes of one parent `StateGraph(MessagesState)` with a
+  single `START -> <build root>` entry edge. `builder.compile()` returns
+  the whole multi-agent `CompiledStateGraph` — routing between nodes at run
+  time is driven entirely by the handoff tools, not by any static edges
+  added to `builder` beyond that one entry point.
+
+**`build(project, agent_name)`**: `self._check_env(...)`; builds every
+reachable agent's node via `_build_agent_node`; if the root has no
+outgoing edges, returns its node directly; else adds every node to a
+`StateGraph(MessagesState)`, adds `START -> agent_name`, and compiles.
+
+**`_build_agent_node(project, name)`**: `destinations =
+dict.fromkeys(edge.to for edge in project.graph.edges if edge.from_ ==
+name)` — deduped, one handoff tool per *distinct* destination even if two
+edges (e.g. one `delegate`, one `handoff`) point at the same agent.
+`create_agent(self._model_for(...), tools=[t.func for t in spec.tools] +
+handoff_tools, system_prompt=spec.instructions, name=name)`.
+
+**Edge mapping — precise, per-edge, the notable verified upstream
+mechanism**: this is the one target where edge *targets* are fully,
+precisely expressible. `_make_handoff_tool(destination)` hand-rolls a
+`transfer_to_<destination>` tool using LangGraph's own `Command` primitive
+(no `langgraph-supervisor`/`langgraph-swarm` dependency — neither is
+installed, and a `Command`-returning tool is LangGraph's own documented,
+dependency-free multi-agent handoff mechanism). The tool is annotated with
+`InjectedState`/`InjectedToolCallId`, and returns `Command(goto=destination,
+update={"messages": [...]}, graph=Command.PARENT)` — `graph=Command.PARENT`
+is what makes the jump target a *sibling* node in the parent `StateGraph`
+rather than a node inside the calling agent's own react-agent subgraph
+(verified via `Command`'s own docstring). An agent with edges to `x` and
+`y` gets exactly `transfer_to_x` and `transfer_to_y` and can reach nothing
+else. Multi-parent graphs and cycles build successfully with no special
+handling: every reachable agent is built exactly once into a
+`dict[str, CompiledStateGraph]` (mirroring `_reachable_agents`'s dedup),
+`StateGraph.add_node` runs once per entry, and a shared or cyclic
+destination is just another `transfer_to_*` tool pointing at a node that
+already exists — LangGraph's own execution loop resolves it by name at run
+time, not this adapter.
+
+**Model routing (`_model_for`)** — LiteLLM `"provider/model"` maps onto
+langchain's `init_chat_model` `"provider:model"` convention
+(`_PROVIDER_MAP = {"gemini": "google_genai", "openai": "openai",
+"anthropic": "anthropic"}` — only the three providers this adapter's extra
+ships an integration package for):
+
+- `gemini/<model>` → `init_chat_model(f"google_genai:{model}")`. Eager:
+  raises a pydantic `ValidationError` ("API key required for Gemini
+  Developer API") immediately if neither `GOOGLE_API_KEY` nor
+  `GEMINI_API_KEY` is set.
+- `openai/<model>` → `init_chat_model(f"openai:{model}")`. Also eager:
+  raises `openai.OpenAIError: "Missing credentials..."` if `OPENAI_API_KEY`
+  isn't set.
+- `anthropic/<model>` → `init_chat_model(f"anthropic:{model}")`. **Lazy**,
+  unlike the other two — constructs successfully with no
+  `ANTHROPIC_API_KEY` set at all, no error until an actual API call.
+  Documented as a deliberate asymmetry, not papered over.
+- Per-target override (`targets.langgraph.model`): passed to
+  `init_chat_model(override, **kwargs)` as-is — its *expected form* is
+  already langchain-native `"provider:model"` (e.g.
+  `"anthropic:claude-opus-4"`), **not** a bare id and **not** a LiteLLM
+  `"provider/model"` string.
+- Anything else: clear `ValueError` naming the agent, its resolved model,
+  and the fix options — mirroring the Claude/AutoGen adapters' error
+  style.
+
+The shipped research-crew example builds unmodified for this target (same
+as AutoGen and CrewAI, unlike Claude) — its gemini-default models are all
+native `google_genai` paths.
+
+**`model_params`**: `_MODEL_PARAM_MAP = {"temperature": "temperature",
+"max_tokens": "max_tokens"}` — one flat map for all three providers.
+Verified `ChatGoogleGenerativeAI` declares `max_output_tokens` with a
+pydantic `validation_alias="max_tokens"` and `populate_by_name=True`, so
+the same `max_tokens=` keyword resolves correctly across all three chat
+model classes with no per-provider remapping (unlike AutoGen's
+separately-typed clients). Anything else is warned-and-ignored.
+
+**Tool wiring**: bare callables pass straight through in `tools=[...]` —
+`create_agent`/`ToolNode` wraps them into a `StructuredTool` itself,
+introspecting signature and docstring exactly like `tools.py`'s own
+contract already guarantees.
+
+**Offline construction**: like AutoGen, the `google_genai` and `openai`
+chat model classes construct their provider client eagerly and fail
+immediately on a missing key; `anthropic` is the one of the three that does
+not. Tests set fake `GOOGLE_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`
+up front (`test_adapter_langgraph.py`'s `provider_keys_env` fixture,
+mirroring AutoGen's).
+
+**Warn-vs-error**: unsupported provider is a hard `ValueError`; every
+`model_params` key outside the map is a warning; a missing key for the two
+eager providers (`gemini`, `openai`) is that provider's own unwrapped SDK
+error, not an adapter-specific one.
+
 ## `cli.py`
 
 Three subcommands plus `--version`, built with `argparse`
@@ -528,16 +960,34 @@ Three subcommands plus `--version`, built with `argparse`
 |---|---|---|
 | `validate` | `common_dir` | Loads + validates; prints project name, entry agent, and per-agent model/tools/env status (env vars flagged `set`/`not set` against the current shell, `required`/`optional`) |
 | `render` | `common_dir` | Loads + validates, then `write_interaction_layer(common_dir, project.graph)`; prints the output path |
-| `run` | `common_dir --target {google-adk,openai} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
+| `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
 | `--version` | — | `argparse`'s built-in `action="version"`; prints `commonadk {version}` (via `importlib.metadata.version("commonadk")`, falling back to `"0.0.0+unknown"` if the package metadata isn't found) and exits `0` via `SystemExit` |
 
 **Lazy SDK imports.** `validate` and `render` only touch `loader.py` and
 `mermaid.py`, neither of which imports any agent SDK at module scope, so
 both commands work with zero SDKs installed. `run` needs exactly one SDK —
-its imports (`google.adk.runners.InMemoryRunner`, `google.genai.types`, or
-`agents.Runner`) live inside `_run_google_adk`/`_run_openai` respectively,
-never at module scope, so `commonadk run ... --target openai` never
-imports `google.adk` and vice versa.
+its imports live inside each target's own `_run_*` function
+(`_run_google_adk`, `_run_openai`, `_run_claude`, `_run_crewai`,
+`_run_autogen`, `_run_langgraph`), never at module scope, so
+`commonadk run ... --target openai` never imports `google.adk`, `claude_agent_sdk`,
+or any other target's SDK.
+
+**Per-target `run` behavior**, `_RUN_TARGETS` dict-dispatched off `--target`:
+
+| target | key preflight | execution shape |
+|---|---|---|
+| `google-adk` | (env preflight only, via `_check_env`) | `InMemoryRunner(agent=..., app_name=...)`, one `run_async` turn, joins final-response text parts |
+| `openai` | (env preflight only) | `Runner.run_sync(agent, prompt)`, prints `.final_output` |
+| `claude` | **`_run_claude` preflights `ANTHROPIC_API_KEY` itself** — raises the same `OSError` shape as `_check_env` if unset, *before* calling `project.build()`. Nothing in the SDK declares or checks for it up front the way `requires.env` does for tool-level vars | `query(prompt=..., options=...)`, joins every `ResultMessage.result` chunk |
+| `crewai` | (env preflight only) | assigns the one `Task` to `crew.agents[0]` for a sequential (solo-member) crew, leaves it unassigned for a hierarchical crew (the manager picks who executes it); `crew.kickoff()`, prints `.raw` |
+| `autogen` | (env preflight only — provider API keys are the SDK's own eager-construction concern, inside `project.build()`, not the CLI's) | `built.run(task=prompt)` — `built` is a bare `AssistantAgent` or a `Swarm`, both exposing the same async `.run(task=...)` shape, no branching needed |
+| `langgraph` | (env preflight only, same eager-construction note as autogen) | `graph.invoke({"messages": [{"role": "user", "content": prompt}]})`, prints the last message's `.content` — same call shape whether `graph` is a lone react agent or the compiled multi-agent graph |
+
+Every target funnels through the *shared* `_check_env` preflight
+(`adapters/base.py`, tool-level `requires.env` only) before its adapter's
+`build()` runs; `claude` additionally has its own CLI-level preflight for
+`ANTHROPIC_API_KEY` specifically, since that's an SDK-authentication
+requirement `requires.env` was never meant to model.
 
 **Warnings surfaced, not swallowed.** `_load_project(common_dir)` wraps
 `loader.load()` in `warnings.catch_warnings(record=True)` +
@@ -559,10 +1009,10 @@ others unless the message already starts with `"commonadk"`) and returns
 `ValueError` (caught by the same handler) if neither is set or if the
 resolved name isn't in `project.agents`. An unrecognized `--target` isn't
 special-cased in the CLI itself — `_cmd_run` looks it up in its own
-`_RUN_TARGETS` dict (`{"google-adk": ..., "openai": ...}`); on a miss it
-calls `adapters.get_adapter(target)` purely to raise that function's
-`ValueError`, so the CLI never hand-maintains a second "known targets"
-list that could drift from `adapters/__init__.py`'s registry.
+`_RUN_TARGETS` dict (six entries, one per adapter registry entry); on a
+miss it calls `adapters.get_adapter(target)` purely to raise that
+function's `ValueError`, so the CLI never hand-maintains a second "known
+targets" list that could drift from `adapters/__init__.py`'s registry.
 
 ## Error taxonomy
 
@@ -586,19 +1036,64 @@ list that could drift from `adapters/__init__.py`'s registry.
 | `resolve_model`/`resolve_model_string` called post-load with an alias not in `model_aliases` | `ValueError` | `models.Project.resolve_model_string` |
 | `resolve_model`/`check_env` called with an unknown agent name | `KeyError` | `models.Project._require_agent` |
 | Required env var missing at build time (`_check_env`, transitively over reachable agents) | `OSError` | `adapters.base.BaseAdapter._check_env` |
+| `ANTHROPIC_API_KEY` unset for `commonadk run --target claude` | `OSError` (raised by the CLI itself, before `project.build()`) | `cli._run_claude` |
 | Unknown `target=` string | `ValueError` | `adapters.get_adapter` |
 | Target's SDK not installed | `ImportError` (with `pip install "commonadk[...]"` hint) | `adapters.get_adapter` |
 | Same agent reachable from two parents (Google ADK build) | `ValueError` | `adapters.google_adk.GoogleADKAdapter._build_agent` |
 | Cycle in the reachable graph (Google ADK build) | `ValueError` | `adapters.google_adk.GoogleADKAdapter._build_agent` |
+| Agent's resolved model isn't `anthropic/...` and no `targets.claude.model` override (Claude Agent SDK build) | `ValueError` | `adapters.claude_agent.ClaudeAgentSDKAdapter._model_for` |
+| `model_params` key unsupported by the Claude Agent SDK (all keys, since none map) | `UserWarning` (non-fatal) | `adapters.claude_agent.ClaudeAgentSDKAdapter._warn_unsupported_model_params` |
+| Build root built as CrewAI hierarchical manager but has declared tools (dropped, not passed through) | `UserWarning` (non-fatal) | `adapters.crewai_adapter.CrewAIAdapter._build_agent` |
+| `model_params` key unsupported by the CrewAI adapter | `UserWarning` (non-fatal) | `adapters.crewai_adapter.CrewAIAdapter._model_param_kwargs` |
+| Agent's resolved model isn't `openai/anthropic/gemini` and no `targets.autogen.model` override (AutoGen build) | `ValueError` | `adapters.autogen_adapter.AutoGenAdapter._client_for` |
+| `model_params` key unsupported by the AutoGen adapter | `UserWarning` (non-fatal) | `adapters.autogen_adapter.AutoGenAdapter._model_param_kwargs` |
+| Missing provider API key for AutoGen's `openai`/`anthropic`/`gemini` native model clients (eager client construction) | the underlying SDK's own error (e.g. `openai.OpenAIError`), unwrapped | `autogen_ext`'s model client `__init__`, called from `adapters.autogen_adapter.AutoGenAdapter._client_for` |
+| Agent's resolved model isn't `gemini/openai/anthropic` and no `targets.langgraph.model` override (LangGraph build) | `ValueError` | `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
+| `model_params` key unsupported by the LangGraph adapter | `UserWarning` (non-fatal) | `adapters.langgraph_adapter.LangGraphAdapter._model_param_kwargs` |
+| Missing provider API key for LangGraph's `openai`/`google_genai` chat models (eager; `anthropic` is lazy and does *not* raise here) | the underlying SDK's own error (e.g. `openai.OpenAIError`, a pydantic `ValidationError`), unwrapped | `langchain.chat_models.init_chat_model`, called from `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
 | Any of the above surfacing through the CLI | printed to `stderr`, exit code `1` | `cli.main`'s `try/except` |
 
 ## Testing layout
 
-All 64 tests (per `tasks.md`) live under `tests/`, sharing two fixtures
-from `tests/conftest.py`: `example_common_dir` (path to
+All 124 tests live under `tests/`, sharing two fixtures from
+`tests/conftest.py`: `example_common_dir` (path to
 `examples/research-crew/common`, read-only) and `tmp_project` (a
 `tmp_path`-backed mutable copy of the same, for tests that deliberately
 break the project).
+
+**Importorskip gating.** Every adapter-specific test file (`test_adapter_*.py`)
+calls `pytest.importorskip("<module>")` **at module scope**, immediately
+after the file's docstring and before importing `commonadk` — so the whole
+file is skipped, not just individual tests, when that target's SDK isn't
+installed, and the `import commonadk` line itself carries a `# noqa: E402`
+comment marking the post-importorskip placement as deliberate. Module
+names: `google.adk` (google), `agents` (openai), `claude_agent_sdk`
+(claude), `crewai` (crewai), `autogen_agentchat` (autogen), and both
+`langgraph`/`langchain` (langgraph — two separate `importorskip` calls,
+since this adapter needs both packages). `test_hypothesis.py` gates
+per-target *inside* the parametrized test body instead, via the same
+module-name mapping, so that one file always collects regardless of which
+subset of SDKs is installed, skipping only the individual parametrized
+cases whose SDK is missing rather than the whole file.
+
+**Fake-key fixture patterns.** Two fixtures recur across every adapter test
+file (each file defines its own local copy; `test_hypothesis.py`'s
+versions are shown below and are representative):
+
+- `tavily_env` — `monkeypatch.setenv("TAVILY_API_KEY", "test-key")` and
+  `monkeypatch.delenv("POSTGRES_DSN", raising=False)`, satisfying
+  researcher's one *required* `requires.env` entry while leaving the
+  optional one unset on purpose (build must not block on it).
+- `provider_keys_env` — fake `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, `GOOGLE_API_KEY` values, needed only by the `autogen`
+  and `langgraph` targets (their model clients construct the underlying
+  provider SDK client eagerly — see those adapters' "Offline construction"
+  above) but harmless to set for every other target's build in the same
+  parametrized test, since none of them read those vars. Used by
+  `test_adapter_autogen.py`, `test_adapter_langgraph.py`, and
+  `test_hypothesis.py`; not needed by `test_adapter_claude.py` or
+  `test_adapter_crewai.py`, whose targets don't construct a provider client
+  eagerly at `build()` time.
 
 | File | Covers |
 |---|---|
@@ -606,6 +1101,11 @@ break the project).
 | `test_loader.py` | Full `load()` happy path (config/entry/agents), instructions + tools populated and callable, `ToolSpec` schema metadata, edges present, frontmatter stripped from `skill.md`, missing folder raises `ValidationError` |
 | `test_validation.py` | Each check individually — unknown tool name, untyped param, missing docstring, edge to unknown agent, bad edge type, folder/name mismatch, unknown model alias, entry mismatch, missing `config.yaml`, unknown YAML key, `runtime:` warns when set / silent when unset — plus one test asserting multiple unrelated problems are *all* collected into one `ValidationError.errors` |
 | `test_mermaid.py` | Node/edge rendering, entry-node marking, delegate vs. handoff arrow styles, `write_interaction_layer` output shape, and a drift guard (`test_example_interaction_layer_matches_current_graph`) asserting the committed `interaction-layer.md` still matches a fresh render of `interactions.yaml` |
-| `test_adapter_google.py` | Gated by `pytest.importorskip("google.adk")` at module scope (whole file skipped, not just individual tests, if `google-adk` isn't installed). Happy-path tree build, multi-parent rejection, cycle rejection, gemini-native vs. `LiteLlm`-wrapped model routing, per-target override precedence, env preflight (missing required blocks, optional doesn't, checks agents reachable via edges — not just direct sub_agents), unknown-target error, missing-SDK install-hint error |
-| `test_adapter_openai.py` | Gated by `pytest.importorskip("agents")` at module scope. Happy-path build, multi-parent graph building via a shared instance, cyclic graph building via post-hoc wiring, openai-native vs. `LitellmModel`-wrapped routing, per-target override, env preflight, and `test_same_project_builds_on_both_targets` — the hypothesis test, which additionally does `pytest.importorskip("google.adk")` inline to build the *same* `Project` on both targets in one test |
-| `test_cli.py` | In-process `cli.main(argv)` calls (no subprocess) asserting exit codes and captured stdout/stderr: `validate` (success summary incl. env set/not-set, broken project exits 1, missing folder exits 1), `render` (writes file, broken project exits 1), `run` (missing env var, unknown target, unknown agent, broken project exits 1 before touching any SDK), `--version` |
+| `test_adapter_google.py` | Gated by `pytest.importorskip("google.adk")`. Happy-path tree build, multi-parent rejection, cycle rejection, gemini-native vs. `LiteLlm`-wrapped model routing, per-target override precedence, env preflight (missing required blocks, optional doesn't, checks agents reachable via edges — not just direct sub_agents), unknown-target error, missing-SDK install-hint error |
+| `test_adapter_openai.py` | Gated by `pytest.importorskip("agents")`. Happy-path build, multi-parent graph building via a shared instance, cyclic graph building via post-hoc wiring, openai-native vs. `LitellmModel`-wrapped routing, per-target override, env preflight |
+| `test_adapter_claude.py` | Gated by `pytest.importorskip("claude_agent_sdk")`. Happy-path build (flat `options.agents` registry, tool/MCP-server wiring), multi-parent and cyclic graphs building without special handling, anthropic-native model resolution, non-anthropic provider raising a clear error, the shipped example failing *without* `targets.claude.model` overrides and succeeding *with* them, per-target override precedence, `model_params` all warned-and-ignored, env preflight (including the reachable-via-edges case) |
+| `test_adapter_crewai.py` | Gated by `pytest.importorskip("crewai")`. Happy-path hierarchical build, solo-sequential fallback for a leaf build, multi-parent and cyclic graphs building via a flat deduped member list, LiteLLM-string-passthrough model routing (including a non-native provider falling back to litellm with *no* error), per-target override, unsupported `model_params` key warned, env preflight |
+| `test_adapter_autogen.py` | Gated by `pytest.importorskip("autogen_agentchat")`. Happy-path `Swarm` build, bare-`AssistantAgent` return for a leaf build (not a team), multi-parent and cyclic graphs via shared participants, openai/gemini/anthropic native model-client routing (including the explicit `model_info` workaround), unsupported-provider error, per-target override, unsupported `model_params` key warned, env preflight |
+| `test_adapter_langgraph.py` | Gated by `pytest.importorskip("langgraph")` and `pytest.importorskip("langchain")`. Happy-path multi-agent `StateGraph` build, bare-react-agent return for a leaf build, multi-parent and cyclic graphs via a flat node registry, duplicate edges to the same destination yielding exactly one handoff tool, gemini/openai/anthropic native routing, unsupported-provider error, per-target override, unsupported `model_params` key warned, env preflight |
+| `test_hypothesis.py` | `test_same_project_builds_on_every_installed_target`, parametrized over all six `target` strings — the v1 success criterion made executable: one `Project`, loaded once, built under whichever targets are actually installed (each case individually skipped via inline `pytest.importorskip`, not the whole file). Asserts each target's return value carries the build root's identity somewhere, under that SDK's own attribute shape (`.name` for google-adk/openai; `.system_prompt` for claude; `.manager_agent.role` for crewai; `._participant_names[0]` for autogen; `"coordinator" in .nodes` for langgraph) |
+| `test_cli.py` | In-process `cli.main(argv)` calls (no subprocess) asserting exit codes and captured stdout/stderr: `validate` (success summary incl. env set/not-set, broken project exits 1, missing folder exits 1), `render` (writes file, broken project exits 1), `run` (missing `requires.env` var, missing `ANTHROPIC_API_KEY` for `--target claude` naming that var in stderr, unknown target, unknown agent, broken project exits 1 before touching any SDK), `--version` |
