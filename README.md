@@ -23,7 +23,8 @@ pip install "commonadk[openai]"   # OpenAI Agents SDK target
 pip install "commonadk[claude]"   # Claude Agent SDK target
 pip install "commonadk[crewai]"   # CrewAI target
 pip install "commonadk[autogen]"   # AutoGen target
-pip install "commonadk[google,openai,claude,crewai,autogen]"   # all five
+pip install "commonadk[langgraph]"   # LangGraph target
+pip install "commonadk[google,openai,claude,crewai,autogen,langgraph]"   # all six
 ```
 
 Point it at the shipped example, a three-agent research crew
@@ -38,6 +39,7 @@ agent = project.build("coordinator", target="openai")       # live agents.Agent
 options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
 crew = project.build("coordinator", target="crewai")         # live crewai.Crew
 team = project.build("coordinator", target="autogen")        # live autogen_agentchat.teams.Swarm
+graph = project.build("coordinator", target="langgraph")     # compiled langgraph.graph.StateGraph
 ```
 
 (`target="claude"` needs each agent's `agent-config.yaml` to carry a
@@ -154,6 +156,7 @@ flowchart TD
 | Claude Agent SDK | `claude` | bare model id when the LiteLLM string is `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
 | CrewAI | `crewai` | `crewai.LLM(model=...)` takes the resolved LiteLLM-format string **directly**, for every provider — no allowlist, no build-time error | routes to a native provider client when it recognizes one, else falls back to litellm's `completion()` itself |
 | AutoGen | `autogen` | bare model id for `openai/...`, `anthropic/...`, and `gemini/...` (native `autogen_ext` model clients) | **no LiteLLM path** — any other provider is a clear build-time error |
+| LangGraph | `langgraph` | `"provider:model"` via `init_chat_model` for `gemini/...` (→ `google_genai`), `openai/...`, and `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
 
 Every agent's `model:` (an alias from `config.yaml` or a raw LiteLLM string
 like `anthropic/claude-sonnet-5`) resolves the same way regardless of
@@ -229,11 +232,30 @@ build root join the crew). See `adapters/crewai_adapter.py`'s module
 docstring for the full investigation, including why the manager role can't
 carry its own tools.
 
+LangGraph is the one target where `interactions.yaml`'s edge *targets* are
+honored **precisely**, not coarsened — the opposite end of the spectrum from
+CrewAI above: `project.build(..., target="langgraph")` gives each reachable
+agent a prebuilt react-agent node (`langchain.agents.create_agent`) in one
+compiled `langgraph.graph.StateGraph`, and for every outgoing
+`interactions.yaml` edge it adds exactly one clearly-named handoff tool
+(`transfer_to_<destination>`) to the *source* agent — an agent can reach
+only the destinations the graph actually names, nothing more. Both
+`delegate` and `handoff` edges map to this one mechanism (the same v1
+intersection decision every other adapter makes). The handoff itself uses
+LangGraph's own `Command(goto=<destination>, graph=Command.PARENT)`
+primitive — no `langgraph-supervisor`/`langgraph-swarm` dependency needed.
+Multi-parent graphs and cycles need no special handling: every reachable
+agent is built once into a flat, name-keyed node registry, so a shared
+destination or a cycle back to the build root is just another named handoff
+tool pointing at a node that already exists. See
+`adapters/langgraph_adapter.py`'s module docstring for the full
+investigation, including why `langchain.agents.create_agent` is used
+instead of the now-deprecated `langgraph.prebuilt.create_react_agent`.
+
 ## Roadmap
 
 CommonADK's plan and every settled design decision live in
 [`plan.md`](plan.md). Notably still ahead: mixed-target spawning (pinning
 individual agents to different SDKs within one project — `agent-config.yaml`
-already reserves a `runtime:` key for this, unhonored in v1), richer edge
-semantics (pipelines, loops, shared state), and additional adapters
-(LangGraph, ...).
+already reserves a `runtime:` key for this, unhonored in v1), and richer
+edge semantics (pipelines, loops, shared state).

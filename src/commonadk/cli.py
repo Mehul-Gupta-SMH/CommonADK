@@ -6,15 +6,16 @@ Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
   print a human-readable summary (or the error list, on failure).
 - `commonadk render <common-dir>` -- regenerate `interaction-layer.md` from
   `interactions.yaml`.
-- `commonadk run <common-dir> --target {google-adk,openai,claude,crewai,autogen}
-  PROMPT` -- build an agent for a target SDK and execute one turn.
+- `commonadk run <common-dir> --target
+  {google-adk,openai,claude,crewai,autogen,langgraph} PROMPT` -- build an
+  agent for a target SDK and execute one turn.
 
 `validate` and `render` never need an agent SDK installed -- they only touch
 `loader.py`/`mermaid.py`, which have no SDK imports at module scope. `run`
 does need one, but only for the target actually requested, so every
 SDK-touching import in this module lives inside the function that uses it
 (see `_run_google_adk` / `_run_openai` / `_run_claude` / `_run_crewai` /
-`_run_autogen`), never at module scope. `_run_claude` additionally
+`_run_autogen` / `_run_langgraph`), never at module scope. `_run_claude` additionally
 preflights `ANTHROPIC_API_KEY` itself --
 the Claude Agent SDK's bundled CLI needs it to authenticate, but (unlike
 `requires.env` in `agent-config.yaml`) nothing in the SDK declares or checks
@@ -89,8 +90,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--target",
         required=True,
-        metavar="{google-adk,openai,claude,crewai,autogen}",
-        help="Agent SDK to build against: google-adk, openai, claude, crewai, or autogen",
+        metavar="{google-adk,openai,claude,crewai,autogen,langgraph}",
+        help="Agent SDK to build against: google-adk, openai, claude, crewai, autogen, or langgraph",
     )
     run_p.add_argument(
         "--agent",
@@ -309,12 +310,26 @@ def _run_autogen(project: "Project", agent_name: str, prompt: str) -> str:
     return str(result.messages[-1].content)
 
 
+def _run_langgraph(project: "Project", agent_name: str, prompt: str) -> str:
+    graph = project.build(agent_name, target="langgraph")
+
+    # `graph` is either a lone react agent's own `CompiledStateGraph` (build
+    # root has no outgoing edges) or the compiled multi-agent `StateGraph`
+    # (build root has at least one) -- see langgraph_adapter.py's module
+    # docstring, "WHAT build() RETURNS". Both expose the same `.invoke(...)`
+    # shape over a `MessagesState`-style input, so no branching on the
+    # return type is needed here.
+    result = graph.invoke({"messages": [{"role": "user", "content": prompt}]})
+    return str(result["messages"][-1].content)
+
+
 _RUN_TARGETS = {
     "google-adk": _run_google_adk,
     "openai": _run_openai,
     "claude": _run_claude,
     "crewai": _run_crewai,
     "autogen": _run_autogen,
+    "langgraph": _run_langgraph,
 }
 
 

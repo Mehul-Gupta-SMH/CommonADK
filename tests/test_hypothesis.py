@@ -3,9 +3,10 @@
 plan.md's bet is that `common/` can be the single source of truth: the same
 project builds, unmodified, on every supported SDK target. This test is
 that claim made executable -- it grows by one target per adapter milestone
-(M2: google-adk, M3: openai, M5: claude, M6: crewai, M7: autogen) rather than living
-duplicated inside each adapter's own test file, so the claim stays visible
-as one parametrized test instead of scattered assertions.
+(M2: google-adk, M3: openai, M5: claude, M6: crewai, M7: autogen, M8:
+langgraph) rather than living duplicated inside each adapter's own test
+file, so the claim stays visible as one parametrized test instead of
+scattered assertions.
 
 Each target is gated by its own `pytest.importorskip` *inside* the test
 body (not at module scope) so this file collects and runs regardless of
@@ -31,17 +32,21 @@ def tavily_env(monkeypatch):
 
 @pytest.fixture()
 def provider_keys_env(monkeypatch):
-    """Fake provider API keys, only actually needed by the autogen target --
-    see autogen_adapter.py's module docstring, "Offline construction": its
-    model clients construct the underlying SDK client eagerly and raise if
-    no key is discoverable. Harmless to set for every other target's build
-    in this same parametrized test, since none of them read these vars."""
+    """Fake provider API keys, only actually needed by the autogen and
+    langgraph targets -- see autogen_adapter.py's and langgraph_adapter.py's
+    module docstrings, "Offline construction": their model clients construct
+    the underlying SDK client eagerly and raise if no key is discoverable.
+    Harmless to set for every other target's build in this same
+    parametrized test, since none of them read these vars."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-test")
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test")
 
 
-@pytest.mark.parametrize("target", ["google-adk", "openai", "claude", "crewai", "autogen"])
+@pytest.mark.parametrize(
+    "target", ["google-adk", "openai", "claude", "crewai", "autogen", "langgraph"]
+)
 def test_same_project_builds_on_every_installed_target(
     example_common_dir, tavily_env, provider_keys_env, target
 ):
@@ -55,6 +60,7 @@ def test_same_project_builds_on_every_installed_target(
         "claude": "claude_agent_sdk",
         "crewai": "crewai",
         "autogen": "autogen_agentchat",
+        "langgraph": "langgraph",
     }[target]
     pytest.importorskip(importorskip_module)
 
@@ -73,6 +79,9 @@ def test_same_project_builds_on_every_installed_target(
     # docstring, "Manager-or-solo-member decision"; AutoGen returns a
     # `Swarm` team here -- coordinator has an outgoing edge -- whose first
     # participant is the build root, see autogen_adapter.py's module
+    # docstring, "WHAT build() RETURNS"; LangGraph returns a compiled
+    # multi-agent `StateGraph` here -- coordinator has an outgoing edge --
+    # whose nodes are keyed by agent name, see langgraph_adapter.py's module
     # docstring, "WHAT build() RETURNS").
     if target == "claude":
         assert agent.system_prompt.strip() != ""
@@ -80,5 +89,7 @@ def test_same_project_builds_on_every_installed_target(
         assert agent.manager_agent.role == "coordinator"
     elif target == "autogen":
         assert agent._participant_names[0] == "coordinator"
+    elif target == "langgraph":
+        assert "coordinator" in agent.nodes
     else:
         assert agent.name == "coordinator"

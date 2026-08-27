@@ -20,6 +20,7 @@ _REGISTRY: dict[str, tuple[str, str, str]] = {
     "claude": ("commonadk.adapters.claude_agent", "ClaudeAgentSDKAdapter", "claude"),
     "crewai": ("commonadk.adapters.crewai_adapter", "CrewAIAdapter", "crewai"),
     "autogen": ("commonadk.adapters.autogen_adapter", "AutoGenAdapter", "autogen"),
+    "langgraph": ("commonadk.adapters.langgraph_adapter", "LangGraphAdapter", "langgraph"),
 }
 
 
