@@ -10,7 +10,7 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 - [x] **M4 — CLI & docs** (`commonadk validate|render|run` + README; 64 tests passing)
 
 - [x] **M5 — Claude Agent SDK adapter** (79 tests; hypothesis test now spans google-adk/openai/claude)
-- [ ] **M6 — CrewAI adapter**
+- [x] **M6 — CrewAI adapter** (92 tests; hypothesis test spans 4 targets)
 - [ ] **M7 — AutoGen adapter**
 - [ ] **M8 — LangGraph adapter**
 
@@ -38,3 +38,5 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-18 | Orchestrator | Reviewed docs; fixed stale "once the CLI lands" note in mermaid.py's generated header (flagged by docs review) and regenerated example interaction-layer.md via `commonadk render`; committed and pushed |
 | 2026-08-18 | Sonnet 5 subagent | Implemented M5: ClaudeAgentSDKAdapter (ClaudeAgentOptions with flat subagent registry + Agent-tool edges, per-agent in-process MCP tool servers, anthropic-only model routing with clear error), CLI claude branch, example claude overrides, hypothesis test parametrized over 3 targets |
 | 2026-08-18 | Orchestrator | Reviewed M5: approved; verified subagent tool isolation, Agent-tool granted only to agents with outgoing edges, non-anthropic error path; 79 tests passing; committed and pushed |
+| 2026-08-19 | Sonnet 5 subagent | Implemented M6: CrewAIAdapter (always returns a Crew — hierarchical with root as manager_agent when reachable agents exist, solo sequential for leaves; LiteLLM-native model pass-through with temperature/max_tokens; crew-wide delegation coarsening documented; manager tools dropped with warning per CrewAI's own constraint), CLI crewai branch, 12 new tests |
+| 2026-08-19 | Orchestrator | Reviewed M6: approved; verified crew shapes, delegation flags, model routing live; noted pip dependency tension (crewai pins openai<3, openai-agents prefers >=3 — resolved to openai 2.54.0, all 92 tests still pass); committed and pushed |

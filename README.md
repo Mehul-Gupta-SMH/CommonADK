@@ -21,7 +21,8 @@ Install with the extra(s) for the SDK(s) you want to build against:
 pip install "commonadk[google]"   # Google ADK target
 pip install "commonadk[openai]"   # OpenAI Agents SDK target
 pip install "commonadk[claude]"   # Claude Agent SDK target
-pip install "commonadk[google,openai,claude]"   # all three
+pip install "commonadk[crewai]"   # CrewAI target
+pip install "commonadk[google,openai,claude,crewai]"   # all four
 ```
 
 Point it at the shipped example, a three-agent research crew
@@ -34,6 +35,7 @@ project = commonadk.load("examples/research-crew/common")   # parse + validate
 agent = project.build("coordinator", target="google-adk")   # live google.adk.Agent
 agent = project.build("coordinator", target="openai")       # live agents.Agent
 options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
+crew = project.build("coordinator", target="crewai")         # live crewai.Crew
 ```
 
 (`target="claude"` needs each agent's `agent-config.yaml` to carry a
@@ -148,6 +150,7 @@ flowchart TD
 | Google ADK | `google-adk` | bare model id when the LiteLLM string is `gemini/...` | `google.adk.models.lite_llm.LiteLlm` |
 | OpenAI Agents SDK | `openai` | bare model id when the LiteLLM string is `openai/...` | `agents.extensions.models.litellm_model.LitellmModel` |
 | Claude Agent SDK | `claude` | bare model id when the LiteLLM string is `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
+| CrewAI | `crewai` | `crewai.LLM(model=...)` takes the resolved LiteLLM-format string **directly**, for every provider — no allowlist, no build-time error | routes to a native provider client when it recognizes one, else falls back to litellm's `completion()` itself |
 
 Every agent's `model:` (an alias from `config.yaml` or a raw LiteLLM string
 like `anthropic/claude-sonnet-5`) resolves the same way regardless of
@@ -202,6 +205,21 @@ agent name. See `adapters/claude_agent.py`'s module docstring for the full
 investigation and the tool-isolation mechanics (each agent's own
 `tools.py` functions become an in-process MCP server it alone can see).
 
+CrewAI is the one target where `interactions.yaml`'s edge *targets* are
+**coarsened**, not fully honored: `project.build(..., target="crewai")`
+builds the requested agent as a hierarchical crew's `manager_agent` (or, if
+it has no reachable agents at all, as the sole member of a solo sequential
+crew) with every other reachable agent as a flat crew member — but CrewAI's
+one delegation mechanism (`allow_delegation=True`) is **crew-wide**: an
+agent that can delegate can reach *any* other crew member, not just the
+agents `interactions.yaml` actually points it at. Both `delegate` and
+`handoff` edges map to this one mechanism. What the graph still controls:
+*whether* an agent can delegate at all (only agents with an outgoing edge
+get `allow_delegation=True`) and *scope* (only agents reachable from the
+build root join the crew). See `adapters/crewai_adapter.py`'s module
+docstring for the full investigation, including why the manager role can't
+carry its own tools.
+
 ## Roadmap
 
 CommonADK's plan and every settled design decision live in
@@ -209,4 +227,4 @@ CommonADK's plan and every settled design decision live in
 individual agents to different SDKs within one project — `agent-config.yaml`
 already reserves a `runtime:` key for this, unhonored in v1), richer edge
 semantics (pipelines, loops, shared state), and additional adapters
-(CrewAI, AutoGen, LangGraph, ...).
+(AutoGen, LangGraph, ...).

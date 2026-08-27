@@ -42,6 +42,14 @@ claude = [
     # adapters/claude_agent.py's module docstring), so no litellm dependency.
     "claude-agent-sdk",
 ]
+crewai = [
+    # crewai's own `LLM` class routes known providers to a native client and
+    # falls back to litellm's `completion()` for everything else (see
+    # adapters/crewai_adapter.py's module docstring, "Model routing") -- the
+    # `litellm` extra is what makes that fallback path actually work instead
+    # of raising ImportError for an unrecognized provider.
+    "crewai[litellm]",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/commonadk"]

@@ -6,15 +6,16 @@ Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
   print a human-readable summary (or the error list, on failure).
 - `commonadk render <common-dir>` -- regenerate `interaction-layer.md` from
   `interactions.yaml`.
-- `commonadk run <common-dir> --target {google-adk,openai,claude} PROMPT` --
-  build an agent for a target SDK and execute one turn.
+- `commonadk run <common-dir> --target {google-adk,openai,claude,crewai} PROMPT`
+  -- build an agent for a target SDK and execute one turn.
 
 `validate` and `render` never need an agent SDK installed -- they only touch
 `loader.py`/`mermaid.py`, which have no SDK imports at module scope. `run`
 does need one, but only for the target actually requested, so every
 SDK-touching import in this module lives inside the function that uses it
-(see `_run_google_adk` / `_run_openai` / `_run_claude`), never at module
-scope. `_run_claude` additionally preflights `ANTHROPIC_API_KEY` itself --
+(see `_run_google_adk` / `_run_openai` / `_run_claude` / `_run_crewai`),
+never at module scope. `_run_claude` additionally preflights
+`ANTHROPIC_API_KEY` itself --
 the Claude Agent SDK's bundled CLI needs it to authenticate, but (unlike
 `requires.env` in `agent-config.yaml`) nothing in the SDK declares or checks
 for it up front.
@@ -88,8 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--target",
         required=True,
-        metavar="{google-adk,openai,claude}",
-        help="Agent SDK to build against: google-adk, openai, or claude",
+        metavar="{google-adk,openai,claude,crewai}",
+        help="Agent SDK to build against: google-adk, openai, claude, or crewai",
     )
     run_p.add_argument(
         "--agent",
@@ -271,10 +272,34 @@ def _run_claude(project: "Project", agent_name: str, prompt: str) -> str:
     return asyncio.run(_invoke())
 
 
+def _run_crewai(project: "Project", agent_name: str, prompt: str) -> str:
+    from crewai import Process, Task
+
+    crew = project.build(agent_name, target="crewai")
+
+    # Hierarchical crews (build root has outgoing edges): leave the task
+    # unassigned -- the manager agent (the build root) picks which crew
+    # member actually executes it. Sequential crews here are always the
+    # solo-member fallback (see crewai_adapter.py's module docstring,
+    # "Manager-or-solo-member decision"), so the one member must be
+    # assigned explicitly.
+    agent = None if crew.process == Process.hierarchical else crew.agents[0]
+    crew.tasks = [
+        Task(
+            description=prompt,
+            expected_output="A complete response to the request above.",
+            agent=agent,
+        )
+    ]
+    result = crew.kickoff()
+    return str(result.raw)
+
+
 _RUN_TARGETS = {
     "google-adk": _run_google_adk,
     "openai": _run_openai,
     "claude": _run_claude,
+    "crewai": _run_crewai,
 }
 
 
