@@ -146,6 +146,35 @@ tasks.md                 # action log
 - **M3 — OpenAI Agents adapter:** *same example* runs unmodified — the hypothesis test.
 - **M4 — CLI & docs:** `commonadk validate | render | run`, README, usage docs.
 
+## Milestones — v2 adapter expansion
+
+Same rules as v1 adapters: optional pip extra per target, lazy imports (core
+never needs an SDK), env preflight via BaseAdapter, importorskip-gated tests,
+and — where an SDK cannot express something (a model provider, a graph shape,
+nesting) — a clear, specific error rather than silent degradation. Each
+adapter documents its mapping of `delegate`/`handoff` edges and its model
+routing in its module docstring, and the docs get a row per target.
+
+- **M5 — Claude Agent SDK adapter** (`claude-agent-sdk`, target `claude`):
+  agents map to AgentDefinition subagents; tools bridge via the SDK's
+  in-process MCP tool mechanism. Anthropic-native models only (`anthropic/*`
+  strings map to bare Claude model ids); other providers are a clear
+  unsupported-provider error (no LiteLLM path in this SDK). Nesting depth
+  beyond what subagents support errors clearly.
+- **M6 — CrewAI adapter** (target `crewai`): CrewAI speaks LiteLLM natively,
+  so model strings pass through nearly verbatim. Tools via crewai's tool
+  wrapper. Edge mapping chosen from what the installed API honestly supports
+  (delegation/crew structure), documented.
+- **M7 — AutoGen adapter** (`autogen-agentchat`, target `autogen`):
+  AssistantAgent with handoffs (Swarm-style) is the natural edge mapping.
+  Model routing via the autogen-ext model clients; unsupported providers
+  error clearly.
+- **M8 — LangGraph adapter** (target `langgraph`): prebuilt react agents +
+  handoff/supervisor wiring; models via langchain's init_chat_model provider
+  mapping from LiteLLM-format strings.
+- The cross-target hypothesis test grows with each milestone: one loaded
+  Project, parametrized over every installed target.
+
 ## Deferred / roadmap
 
 - **Mixed-target spawning (heterogeneous deployments).** Future versions will allow

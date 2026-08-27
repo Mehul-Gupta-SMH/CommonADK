@@ -137,6 +137,23 @@ def test_run_missing_required_env_var_exits_nonzero(example_common_dir, monkeypa
     assert "missing required environment variable" in captured.err
 
 
+def test_run_claude_missing_anthropic_key_exits_nonzero(
+    example_common_dir, monkeypatch, capsys
+):
+    pytest.importorskip("claude_agent_sdk")
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    rc = cli.main(
+        ["run", str(example_common_dir), "--target", "claude", "research this"]
+    )
+    captured = capsys.readouterr()
+
+    assert rc != 0
+    assert "ANTHROPIC_API_KEY" in captured.err
+
+
 def test_run_unknown_target_exits_nonzero_naming_known_targets(
     example_common_dir, monkeypatch, capsys
 ):

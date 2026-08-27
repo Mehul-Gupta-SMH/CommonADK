@@ -37,6 +37,67 @@ google = [
 openai = [
     "openai-agents[litellm]",
 ]
+claude = [
+    # Anthropic-native only -- no LiteLLM path for this target (see
+    # adapters/claude_agent.py's module docstring), so no litellm dependency.
+    "claude-agent-sdk",
+]
+crewai = [
+    # crewai's own `LLM` class routes known providers to a native client and
+    # falls back to litellm's `completion()` for everything else (see
+    # adapters/crewai_adapter.py's module docstring, "Model routing") -- the
+    # `litellm` extra is what makes that fallback path actually work instead
+    # of raising ImportError for an unrecognized provider.
+    "crewai[litellm]",
+]
+autogen = [
+    # Microsoft's current AutoGen stack (autogen-agentchat/-core/-ext,
+    # 0.4+) -- NOT the community `ag2` fork, which has an unrelated API
+    # (see adapters/autogen_adapter.py's module docstring). The `openai`
+    # extra ships the native OpenAI model client used for the `openai/...`
+    # provider AND, via its own built-in model-name special-casing, the
+    # `gemini/...` provider (see module docstring, "Model routing"); the
+    # `anthropic` extra ships the separate native client used for
+    # `anthropic/...`. No version pin was needed to keep the other extras'
+    # test suites green -- see that same docstring's closing note, and this
+    # project's full-suite run notes, for the one observed (harmless)
+    # dependency wrinkle: autogen-core pins protobuf~=5.29, which downgrades
+    # protobuf from the newer version google-adk's own dependencies want.
+    # No installed code path this project's tests exercise is affected.
+    "autogen-agentchat",
+    "autogen-ext[openai,anthropic]",
+]
+langgraph = [
+    # LangGraph itself (prebuilt agent nodes, StateGraph, the Command
+    # primitive this adapter's handoff tools use) plus langchain's
+    # provider-routing model-loading facade (`langchain.chat_models.
+    # init_chat_model`, "provider:model" strings, and its current
+    # `langchain.agents.create_agent` -- see adapters/langgraph_adapter.py's
+    # module docstring for why `langgraph.prebuilt.create_react_agent` is
+    # NOT used: it is deprecated in favor of `create_agent` in this
+    # installed stack). No `langgraph-supervisor`/`langgraph-swarm` --
+    # deliberately not needed, see that same docstring's "Handoff
+    # mechanism".
+    "langgraph",
+    "langchain",
+    # One langchain integration package per LiteLLM provider this adapter
+    # ships a native path for (see module docstring, "Model routing"):
+    # gemini/* -> google_genai, openai/* -> openai, anthropic/* ->
+    # anthropic. No litellm fallback -- unsupported providers are a clear
+    # build-time error, matching the AutoGen and Claude Agent SDK adapters'
+    # policy rather than CrewAI's. No version pin was needed to keep every
+    # other extra's test suite green -- this extra's install resolved
+    # cleanly against every package already pinned by google/openai/claude/
+    # crewai/autogen (verified: `pip check`'s only findings after
+    # installing this extra are the same pre-existing, harmless tensions
+    # already noted in the `autogen` extra above and in this project's full-
+    # suite run notes -- openai-agents wanting openai>=3 while crewai pins
+    # it to 2.x, and protobuf being held to 5.29 by autogen-core/google-adk
+    # transitively -- nothing this extra's own code paths touch).
+    "langchain-google-genai",
+    "langchain-openai",
+    "langchain-anthropic",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/commonadk"]

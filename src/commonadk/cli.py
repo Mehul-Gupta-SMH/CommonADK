@@ -6,14 +6,20 @@ Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
   print a human-readable summary (or the error list, on failure).
 - `commonadk render <common-dir>` -- regenerate `interaction-layer.md` from
   `interactions.yaml`.
-- `commonadk run <common-dir> --target {google-adk,openai} PROMPT` -- build an
+- `commonadk run <common-dir> --target
+  {google-adk,openai,claude,crewai,autogen,langgraph} PROMPT` -- build an
   agent for a target SDK and execute one turn.
 
 `validate` and `render` never need an agent SDK installed -- they only touch
 `loader.py`/`mermaid.py`, which have no SDK imports at module scope. `run`
 does need one, but only for the target actually requested, so every
 SDK-touching import in this module lives inside the function that uses it
-(see `_run_google_adk` / `_run_openai`), never at module scope.
+(see `_run_google_adk` / `_run_openai` / `_run_claude` / `_run_crewai` /
+`_run_autogen` / `_run_langgraph`), never at module scope. `_run_claude` additionally
+preflights `ANTHROPIC_API_KEY` itself --
+the Claude Agent SDK's bundled CLI needs it to authenticate, but (unlike
+`requires.env` in `agent-config.yaml`) nothing in the SDK declares or checks
+for it up front.
 
 Every command funnels its expected failure modes -- `ValidationError` (bad
 project), `OSError` (missing required env var, from the adapters' env
@@ -84,8 +90,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--target",
         required=True,
-        metavar="{google-adk,openai}",
-        help="Agent SDK to build against: google-adk or openai",
+        metavar="{google-adk,openai,claude,crewai,autogen,langgraph}",
+        help="Agent SDK to build against: google-adk, openai, claude, crewai, autogen, or langgraph",
     )
     run_p.add_argument(
         "--agent",
@@ -243,9 +249,87 @@ def _run_openai(project: "Project", agent_name: str, prompt: str) -> str:
     return str(result.final_output)
 
 
+def _run_claude(project: "Project", agent_name: str, prompt: str) -> str:
+    import asyncio
+
+    from claude_agent_sdk import ResultMessage, query
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise OSError(
+            "commonadk: missing required environment variable for target "
+            "'claude': ANTHROPIC_API_KEY (the Claude Agent SDK's bundled "
+            "CLI needs it to authenticate with the Anthropic API)"
+        )
+
+    options = project.build(agent_name, target="claude")
+
+    async def _invoke() -> str:
+        chunks: list[str] = []
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage) and message.result:
+                chunks.append(message.result)
+        return "\n".join(chunks)
+
+    return asyncio.run(_invoke())
+
+
+def _run_crewai(project: "Project", agent_name: str, prompt: str) -> str:
+    from crewai import Process, Task
+
+    crew = project.build(agent_name, target="crewai")
+
+    # Hierarchical crews (build root has outgoing edges): leave the task
+    # unassigned -- the manager agent (the build root) picks which crew
+    # member actually executes it. Sequential crews here are always the
+    # solo-member fallback (see crewai_adapter.py's module docstring,
+    # "Manager-or-solo-member decision"), so the one member must be
+    # assigned explicitly.
+    agent = None if crew.process == Process.hierarchical else crew.agents[0]
+    crew.tasks = [
+        Task(
+            description=prompt,
+            expected_output="A complete response to the request above.",
+            agent=agent,
+        )
+    ]
+    result = crew.kickoff()
+    return str(result.raw)
+
+
+def _run_autogen(project: "Project", agent_name: str, prompt: str) -> str:
+    import asyncio
+
+    built = project.build(agent_name, target="autogen")
+
+    # `built` is either a bare `AssistantAgent` (build root has no outgoing
+    # edges -- see autogen_adapter.py's module docstring, "WHAT build()
+    # RETURNS") or a ready-to-run `Swarm` team (build root has at least one
+    # outgoing edge). Both expose the same `async .run(task=...) ->
+    # TaskResult` shape, so no branching on the return type is needed here.
+    result = asyncio.run(built.run(task=prompt))
+    return str(result.messages[-1].content)
+
+
+def _run_langgraph(project: "Project", agent_name: str, prompt: str) -> str:
+    graph = project.build(agent_name, target="langgraph")
+
+    # `graph` is either a lone react agent's own `CompiledStateGraph` (build
+    # root has no outgoing edges) or the compiled multi-agent `StateGraph`
+    # (build root has at least one) -- see langgraph_adapter.py's module
+    # docstring, "WHAT build() RETURNS". Both expose the same `.invoke(...)`
+    # shape over a `MessagesState`-style input, so no branching on the
+    # return type is needed here.
+    result = graph.invoke({"messages": [{"role": "user", "content": prompt}]})
+    return str(result["messages"][-1].content)
+
+
 _RUN_TARGETS = {
     "google-adk": _run_google_adk,
     "openai": _run_openai,
+    "claude": _run_claude,
+    "crewai": _run_crewai,
+    "autogen": _run_autogen,
+    "langgraph": _run_langgraph,
 }
 
 

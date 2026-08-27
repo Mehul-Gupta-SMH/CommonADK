@@ -20,7 +20,11 @@ Install with the extra(s) for the SDK(s) you want to build against:
 ```bash
 pip install "commonadk[google]"   # Google ADK target
 pip install "commonadk[openai]"   # OpenAI Agents SDK target
-pip install "commonadk[google,openai]"   # both
+pip install "commonadk[claude]"   # Claude Agent SDK target
+pip install "commonadk[crewai]"   # CrewAI target
+pip install "commonadk[autogen]"   # AutoGen target
+pip install "commonadk[langgraph]"   # LangGraph target
+pip install "commonadk[google,openai,claude,crewai,autogen,langgraph]"   # all six
 ```
 
 Point it at the shipped example, a three-agent research crew
@@ -32,7 +36,15 @@ import commonadk
 project = commonadk.load("examples/research-crew/common")   # parse + validate
 agent = project.build("coordinator", target="google-adk")   # live google.adk.Agent
 agent = project.build("coordinator", target="openai")       # live agents.Agent
+options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
+crew = project.build("coordinator", target="crewai")         # live crewai.Crew
+team = project.build("coordinator", target="autogen")        # live autogen_agentchat.teams.Swarm
+graph = project.build("coordinator", target="langgraph")     # compiled langgraph.graph.StateGraph
 ```
+
+(`target="claude"` needs each agent's `agent-config.yaml` to carry a
+`targets.claude.model` override, since the example's default models are
+gemini — see "Supported targets" below.)
 
 Or from the command line:
 
@@ -141,6 +153,10 @@ flowchart TD
 |---|---|---|---|
 | Google ADK | `google-adk` | bare model id when the LiteLLM string is `gemini/...` | `google.adk.models.lite_llm.LiteLlm` |
 | OpenAI Agents SDK | `openai` | bare model id when the LiteLLM string is `openai/...` | `agents.extensions.models.litellm_model.LitellmModel` |
+| Claude Agent SDK | `claude` | bare model id when the LiteLLM string is `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
+| CrewAI | `crewai` | `crewai.LLM(model=...)` takes the resolved LiteLLM-format string **directly**, for every provider — no allowlist, no build-time error | routes to a native provider client when it recognizes one, else falls back to litellm's `completion()` itself |
+| AutoGen | `autogen` | bare model id for `openai/...`, `anthropic/...`, and `gemini/...` (native `autogen_ext` model clients) | **no LiteLLM path** — any other provider is a clear build-time error |
+| LangGraph | `langgraph` | `"provider:model"` via `init_chat_model` for `gemini/...` (→ `google_genai`), `openai/...`, and `anthropic/...` | **no LiteLLM path** — any other provider is a clear build-time error |
 
 Every agent's `model:` (an alias from `config.yaml` or a raw LiteLLM string
 like `anthropic/claude-sonnet-5`) resolves the same way regardless of
@@ -149,6 +165,21 @@ natively or needs the SDK's own LiteLLM wrapper. A per-agent
 `targets.<sdk>.model` override in `agent-config.yaml` bypasses resolution
 entirely and is passed through as-is, for when you need an SDK-native model
 form commonadk doesn't infer.
+
+The Claude Agent SDK runs Anthropic models only — it has no LiteLLM wrapper
+at all, so an agent whose model resolves to any provider other than
+`anthropic/...` fails to build for `target="claude"` with a clear error
+naming the agent, its resolved model string, and how to fix it (an
+`anthropic/...` model, a different alias, or a `targets.claude.model`
+override). This is why research-crew's `agent-config.yaml` files each carry
+a `targets.claude.model: claude-sonnet-5` override — the project's default
+models are gemini.
+
+AutoGen is similar in spirit: no LiteLLM path, but three native model
+clients (`openai/...`, `anthropic/...`, `gemini/...`) instead of one, so the
+shipped example builds unmodified with no `targets.autogen.model` overrides
+needed at all. Any other provider still fails to build with the same style
+of clear, actionable error.
 
 ## Delegate and handoff, per SDK
 
@@ -168,11 +199,63 @@ while the same shape can be legitimately rejected for Google ADK. (v1 does
 not yet distinguish `delegate` from `handoff` *within* either adapter — both
 edge types map to the one mechanism each SDK exposes today.)
 
+The Claude Agent SDK is session/query-based, not agent-object-based: instead
+of a live agent, `project.build(..., target="claude")` returns a
+`claude_agent_sdk.ClaudeAgentOptions` — the config object you pass to that
+SDK's `query()`. Its subagents (`options.agents`) are declared once, in a
+single **flat** `dict[str, AgentDefinition]`, not a nested tree — and per
+the SDK's own docs, any agent whose tools include the Agent tool can invoke
+*any* name in that flat registry, not just a parent-declared child. So this
+adapter registers every agent reachable from the build root (the whole
+transitive closure, however deep) into that one flat dict, and grants Agent
+tool access only to the reachable agents that actually have an outgoing
+edge in `interactions.yaml` — a deep edge (e.g. `researcher -> writer` when
+building `coordinator`) is fully representable this way, and — like OpenAI
+Agents' reference-based `handoffs` — a shared sub-agent or a cycle needs no
+special rejection either: the flat dict just holds one entry per logical
+agent name. See `adapters/claude_agent.py`'s module docstring for the full
+investigation and the tool-isolation mechanics (each agent's own
+`tools.py` functions become an in-process MCP server it alone can see).
+
+CrewAI is the one target where `interactions.yaml`'s edge *targets* are
+**coarsened**, not fully honored: `project.build(..., target="crewai")`
+builds the requested agent as a hierarchical crew's `manager_agent` (or, if
+it has no reachable agents at all, as the sole member of a solo sequential
+crew) with every other reachable agent as a flat crew member — but CrewAI's
+one delegation mechanism (`allow_delegation=True`) is **crew-wide**: an
+agent that can delegate can reach *any* other crew member, not just the
+agents `interactions.yaml` actually points it at. Both `delegate` and
+`handoff` edges map to this one mechanism. What the graph still controls:
+*whether* an agent can delegate at all (only agents with an outgoing edge
+get `allow_delegation=True`) and *scope* (only agents reachable from the
+build root join the crew). See `adapters/crewai_adapter.py`'s module
+docstring for the full investigation, including why the manager role can't
+carry its own tools.
+
+LangGraph is the one target where `interactions.yaml`'s edge *targets* are
+honored **precisely**, not coarsened — the opposite end of the spectrum from
+CrewAI above: `project.build(..., target="langgraph")` gives each reachable
+agent a prebuilt react-agent node (`langchain.agents.create_agent`) in one
+compiled `langgraph.graph.StateGraph`, and for every outgoing
+`interactions.yaml` edge it adds exactly one clearly-named handoff tool
+(`transfer_to_<destination>`) to the *source* agent — an agent can reach
+only the destinations the graph actually names, nothing more. Both
+`delegate` and `handoff` edges map to this one mechanism (the same v1
+intersection decision every other adapter makes). The handoff itself uses
+LangGraph's own `Command(goto=<destination>, graph=Command.PARENT)`
+primitive — no `langgraph-supervisor`/`langgraph-swarm` dependency needed.
+Multi-parent graphs and cycles need no special handling: every reachable
+agent is built once into a flat, name-keyed node registry, so a shared
+destination or a cycle back to the build root is just another named handoff
+tool pointing at a node that already exists. See
+`adapters/langgraph_adapter.py`'s module docstring for the full
+investigation, including why `langchain.agents.create_agent` is used
+instead of the now-deprecated `langgraph.prebuilt.create_react_agent`.
+
 ## Roadmap
 
 CommonADK's plan and every settled design decision live in
 [`plan.md`](plan.md). Notably still ahead: mixed-target spawning (pinning
 individual agents to different SDKs within one project — `agent-config.yaml`
-already reserves a `runtime:` key for this, unhonored in v1), richer edge
-semantics (pipelines, loops, shared state), and additional adapters
-(CrewAI, LangGraph, Claude Agent SDK, ...).
+already reserves a `runtime:` key for this, unhonored in v1), and richer
+edge semantics (pipelines, loops, shared state).
