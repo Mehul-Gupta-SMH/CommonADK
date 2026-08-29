@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="CommonADK — define agents once, build on any agent SDK" width="100%">
+</p>
+
 # CommonADK
 
 CommonADK is a LiteLLM-style layer for agent SDKs: define an agent system
@@ -12,6 +16,18 @@ the same way LiteLLM lets you call any LLM provider through one interface.
 The v1 success criterion (see [`plan.md`](plan.md)): the same `common/`
 folder builds and runs unmodified on both Google ADK and the OpenAI Agents
 SDK. It does — [`examples/research-crew`](examples/research-crew) is proof.
+
+## Demo
+
+<p align="center">
+  <img src="assets/demo.gif" alt="Terminal recording of commonadk validate and examples/demo.py building the same common/ folder on all six SDK targets" width="100%">
+</p>
+
+Real, captured output — `commonadk validate` on the shipped `research-crew`
+example, then `python3 examples/demo.py` building the same `coordinator`
+agent, unmodified, on all six SDK targets. Run it yourself with
+[`examples/demo.py`](examples/demo.py), or read the full unedited
+transcripts in [`docs/demo-runs.md`](docs/demo-runs.md).
 
 ## Quickstart
 

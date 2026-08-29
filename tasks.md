@@ -49,3 +49,5 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-27 | Orchestrator | Branch restarted from merged main (PRs #2 and #3 both merged); pushed restart point |
 | 2026-08-27 | Sonnet 5 subagent | Docs audit (fixed stale two-SDKs wording; added multi-extra install note with verified pip tensions) + demo runs: examples/demo.py (offline, builds all six targets, labeled error demonstrations), docs/demo-runs.md (real captured output only), tests/test_demo.py; 126 tests passing |
 | 2026-08-27 | Orchestrator | Reviewed: reran suite (126) and demo (exit 0, all six targets OK); committed, pushed, opened PR |
+| 2026-08-27 | Sonnet 5 subagent | Added repo visuals: assets/banner.png (1280x640, GitHub social-preview size) + assets/demo.gif (14-frame terminal replay of real captured validate/demo output), both with reproducible Pillow generator scripts; README banner + Demo section |
+| 2026-08-27 | Orchestrator | Reviewed visuals (inspected banner and final GIF frame; verified transcript matches real demo output); committed, pushed, opened PR |
