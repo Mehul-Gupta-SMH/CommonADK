@@ -27,6 +27,21 @@ pip install "commonadk[langgraph]"   # LangGraph target
 pip install "commonadk[google,openai,claude,crewai,autogen,langgraph]"   # all six
 ```
 
+**Installing multiple extras together.** All six extras have been verified
+to resolve and install together (this repo runs its full test suite against
+all six at once), but two dependency tensions are worth knowing about — both
+harmless for everything commonadk itself touches: `crewai` pins `openai<3`,
+so installing it alongside `openai-agents` (which prefers `openai>=3`)
+resolves `openai` down to a 2.x release — pip then reports that as an
+unsatisfied requirement (`pip check` will flag it), but no code path this
+project exercises needs `openai>=3`. And `autogen-core` pins
+`protobuf~=5.29`, which pulls `protobuf` down from the newer major version
+several of `google-adk`'s own dependencies (`grpcio-status`,
+`google-api-core`, ...) would otherwise prefer — again flagged by `pip
+check`, again with no observed effect on this project's own code. Neither
+tension breaks `import commonadk`, `commonadk validate|render`, or any
+adapter's `build()`.
+
 Point it at the shipped example, a three-agent research crew
 (`coordinator` → `researcher` → `writer`):
 
@@ -59,6 +74,10 @@ tools, and required env vars (flagging which are actually set in your
 shell). `render` regenerates `interaction-layer.md` from `interactions.yaml`
 so the diagram never drifts from the spec. `run` builds one agent for a
 target SDK and executes a single turn — this one needs real API keys.
+
+For a runnable, offline tour of all of the above — including `project.build()`
+against all six targets and real captured CLI output — see
+[`examples/demo.py`](examples/demo.py) and [`docs/demo-runs.md`](docs/demo-runs.md).
 
 ## The `common/` folder
 
@@ -184,9 +203,10 @@ of clear, actionable error.
 ## Delegate and handoff, per SDK
 
 `interactions.yaml` has one edge vocabulary — `delegate` and `handoff` — but
-the two SDKs express "one agent routes work to another" through genuinely
-different data shapes, and each adapter honors that shape rather than
-flattening it away. Google ADK's `sub_agents` form a strict **tree**: an
+each of the six SDKs expresses "one agent routes work to another" through a
+genuinely different data shape, and each adapter honors that shape rather
+than flattening it away. Starting with the two SDKs v1 targeted: Google
+ADK's `sub_agents` form a strict **tree**: an
 agent instance can have exactly one parent, so a `common/` graph reachable
 from the build root must itself be a tree, or the adapter raises before
 constructing anything (a cycle, or an agent reachable from two parents, is
