@@ -19,8 +19,8 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 
 | Feature | Issue |
 |---|---|
-| CI: run the suite on push/PR (core, per-extra matrix, all-extras) | [#6](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/6) |
-| Publish v0.1.0 to PyPI (tag-triggered, trusted publishing) | [#7](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/7) |
+| CI: run the suite on push/PR — minimal core-only CI shipped; per-extra matrix and all-extras still open | [#6](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/6) |
+| Publish to PyPI (tag-triggered, trusted publishing) — workflow shipped, awaiting first tag | [#7](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/7) |
 | Verified live runs: one real LLM turn per target, secrets-gated | [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) |
 
 ## Planned

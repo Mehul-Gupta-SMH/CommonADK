@@ -31,6 +31,8 @@ transcripts in [`docs/demo-runs.md`](docs/demo-runs.md).
 
 ## Quickstart
 
+`commonadk` is on PyPI from v0.0.1: `pip install commonadk` gets you the
+core (loader, validator, mermaid renderer, CLI) with no agent SDK attached.
 Install with the extra(s) for the SDK(s) you want to build against:
 
 ```bash
