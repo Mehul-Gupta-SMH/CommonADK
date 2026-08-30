@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "commonadk"
-version = "0.1.0"
+version = "0.0.1"
 description = "Define an agent system once, in a framework-neutral format, and materialize it into any agent SDK."
 readme = "README.md"
 license = "Apache-2.0"

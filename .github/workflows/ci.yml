@@ -1,0 +1,28 @@
+name: CI
+
+# Minimal CI (issue #6): core-only install, single job. Adapter tests
+# `pytest.importorskip` their target SDK at module scope, so they skip
+# cleanly here instead of failing -- by design, see tests/test_adapter_*.py.
+# The full per-extra / all-extras matrix stays with issue #6.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install commonadk (core + dev)
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python3 -m pytest -q

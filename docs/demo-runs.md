@@ -18,7 +18,7 @@ bottom for what a live `commonadk run` actually needs, per target).
 
 ```
 $ commonadk --version
-commonadk 0.1.0
+commonadk 0.0.1
 ```
 
 ## `commonadk validate examples/research-crew/common`
