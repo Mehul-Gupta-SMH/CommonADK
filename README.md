@@ -290,8 +290,11 @@ instead of the now-deprecated `langgraph.prebuilt.create_react_agent`.
 
 ## Roadmap
 
-CommonADK's plan and every settled design decision live in
-[`plan.md`](plan.md). Notably still ahead: mixed-target spawning (pinning
-individual agents to different SDKs within one project — `agent-config.yaml`
-already reserves a `runtime:` key for this, unhonored in v1), and richer
-edge semantics (pipelines, loops, shared state).
+The full feature map — shipped, next up, and planned — lives in
+[`ROADMAP.md`](ROADMAP.md), with a GitHub issue per open item where
+discussion happens. Headliners: mixed-target spawning (pinning individual
+agents to different SDKs within one project,
+[#9](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/9)) and richer
+edge semantics (pipelines, loops, shared state,
+[#10](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/10)). Design
+history and settled decisions stay in [`plan.md`](plan.md).
