@@ -51,3 +51,4 @@ All actions taken on this project are logged here. Planning lives in `plan.md`.
 | 2026-08-27 | Orchestrator | Reviewed: reran suite (126) and demo (exit 0, all six targets OK); committed, pushed, opened PR |
 | 2026-08-27 | Sonnet 5 subagent | Added repo visuals: assets/banner.png (1280x640, GitHub social-preview size) + assets/demo.gif (14-frame terminal replay of real captured validate/demo output), both with reproducible Pillow generator scripts; README banner + Demo section |
 | 2026-08-27 | Orchestrator | Reviewed visuals (inspected banner and final GIF frame; verified transcript matches real demo output); committed, pushed, opened PR |
+| 2026-08-30 | Orchestrator | Opened roadmap issues #6-#12 (CI, PyPI release, live runs, mixed-target spawning, richer edge semantics, new adapters, quality backlog); added ROADMAP.md linking them; README roadmap section now points at ROADMAP.md; opened PR |
