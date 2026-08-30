@@ -1,15 +1,19 @@
 name: Publish
 
-# Tag-triggered release to PyPI via Trusted Publishing (issue #7) -- no
-# tokens or secrets: the "publish" job authenticates to PyPI purely via the
+# Release to PyPI via Trusted Publishing (issue #7) -- no tokens or
+# secrets: the "publish" job authenticates to PyPI purely via the
 # short-lived OIDC token minted from `permissions: id-token: write`, scoped
-# to the "pypi" environment. Push a tag "vX.Y.Z" matching pyproject.toml's
-# `version` to release.
+# to the "pypi" environment. Two ways to release:
+#   - push a tag "vX.Y.Z" matching pyproject.toml's `version`, or
+#   - run the workflow manually (workflow_dispatch); it publishes
+#     pyproject.toml's version and then pushes the matching "vX.Y.Z" tag
+#     itself, so the repo stays tagged either way.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -39,8 +43,12 @@ jobs:
 
       - name: Guard -- tag must match pyproject.toml version
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           PYPROJECT_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -- releasing pyproject.toml version $PYPROJECT_VERSION (tag pushed after publish)."
+            exit 0
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
           if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
             echo "::error::Tag $GITHUB_REF_NAME (version $TAG_VERSION) does not match pyproject.toml version $PYPROJECT_VERSION"
             exit 1
@@ -77,3 +85,27 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  tag:
+    # On a manual dispatch there is no tag yet -- create it after a
+    # successful publish so the repo history stays tagged either way.
+    if: github.event_name == 'workflow_dispatch'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push tag matching the published version
+        run: |
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          TAG="v$VERSION"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists -- nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
