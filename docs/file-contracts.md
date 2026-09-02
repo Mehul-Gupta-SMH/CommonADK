@@ -34,7 +34,8 @@ into a `ValidationError` entry naming the bad key
 "extra config for future use" escape hatch anywhere in these files except
 the two fields explicitly designed as one: `agent-config.yaml`'s `targets:`
 block (per-SDK overrides, itself typed `dict[str, dict[str, Any]]` — the
-*inner* dict is intentionally open) and its reserved `runtime:` key.
+*inner* dict is intentionally open) and its `runtime:` key (mixed-target
+spawning — see below).
 
 ## `common/config.yaml` → `ProjectConfig`
 
@@ -80,7 +81,7 @@ one this list happens to call out.)
 | `tools` | `list[str]` | no | `[]` | function names that must exist in this agent's `tools.py` |
 | `requires` | `Requires` | no | `Requires()` (i.e. `env: []`) | runtime prerequisites, names only |
 | `targets` | `dict[str, dict[str, Any]]` | no | `{}` | per-SDK override block — escape hatch (see below) |
-| `runtime` | `str` | no | `None` | **reserved**, unused in v1 — see below |
+| `runtime` | `str` | no | `None` | pins this agent's SDK for mixed-target spawning — see below |
 
 ### `requires.env` → `Requires` / `EnvRequirement`
 
@@ -138,15 +139,21 @@ recognize (e.g. `init_chat_model` raising because `"gemini/gemini-2.5-pro"`
 doesn't split on `:` the way it expects), unwrapped and un-reworded by
 commonadk.
 
-### `runtime:` — reserved key
+### `runtime:` — mixed-target spawning
 
-Reserved for future mixed-target spawning (`plan.md`, "Deferred /
-roadmap") — pinning a specific agent to a specific SDK within one project.
-**Not honored in v1**: setting it does not change how `project.build()`
-behaves; every agent still builds under the single `target=` passed to
-that call. Setting it produces a `UserWarning` at load time
-(`validation._check_runtime`), not an error — the project still loads and
-builds normally. No shipped agent sets it.
+Pins a specific agent to a specific SDK for mixed-target spawning — see
+[`mixed-target-design.md`](mixed-target-design.md) for the full design.
+Setting it never changes `project.build(..., target=...)`: that call still
+builds every agent under the single `target=` passed to it, unconditionally
+— no shipped `research-crew` agent sets `runtime:`, and that project builds
+identically to every version of commonadk before this feature.
+`project.build_mixed(agent_name, default_target=...)` is the call that
+honors it: an agent's own `runtime:` if set, else `default_target`. At load
+time, `validation._check_runtime` errors (not warns) if `runtime:` names a
+target `commonadk.adapters` doesn't register, or a registered target whose
+SDK isn't installed (the same install-hint text `get_adapter` produces).
+See [`examples/mixed-crew`](../examples/mixed-crew) for a project that sets
+it.
 
 **Validation**: every `tools:` name must be defined as a function in that
 agent's `tools.py`, with a docstring and full parameter type hints

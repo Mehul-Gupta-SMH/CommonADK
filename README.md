@@ -296,6 +296,29 @@ tool pointing at a node that already exists. See
 investigation, including why `langchain.agents.create_agent` is used
 instead of the now-deprecated `langgraph.prebuilt.create_react_agent`.
 
+## Mixed-target spawning
+
+Every example above builds one `common/` project under one SDK at a time.
+`project.build_mixed(agent_name, default_target=...)` relaxes that: any
+agent can pin itself to its own SDK with `runtime:` in its
+`agent-config.yaml`, and agents that leave it unset fall back to
+`default_target` — a project with no `runtime:` set anywhere behaves
+exactly as before. Agents sharing a runtime and connected by
+`interactions.yaml` edges are still built as one true native sub-graph by
+their own adapter (an ADK `sub_agents` tree stays a tree); only the edges
+that cross runtimes are bridged, as a plain callable "transfer to
+`<agent>`" tool on the crossing edge's source agent — the same "every SDK
+wraps a plain typed function into a tool" mechanism this whole project is
+built on. `google-adk`, `openai`, `crewai`, and `claude` can source a
+cross-runtime edge in v1; `autogen` and `langgraph` cannot yet (see
+[`docs/mixed-target-design.md`](docs/mixed-target-design.md) for exactly
+why, verified against each installed SDK) — every target can be the
+*destination* of one either way. See
+[`examples/mixed-crew`](examples/mixed-crew) for a small two-runtime
+project, and the design doc for the full three-layer model, the island
+algorithm, and the failure modes. This is in-process only — no network
+protocol between SDKs yet; that's future work (issue #9).
+
 ## Roadmap
 
 The full feature map — shipped, next up, and planned — lives in

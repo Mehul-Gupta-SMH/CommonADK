@@ -57,11 +57,16 @@ class AgentConfig(BaseModel):
     requires: Requires = Field(default_factory=Requires)
     targets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     runtime: Optional[str] = None
-    """Reserved for future mixed-target spawning (plan.md "Deferred / roadmap").
+    """Pins this agent to a specific SDK for mixed-target spawning.
 
-    Unset in v1. If set, validation emits a warning that it is not yet
-    honored -- `project.build(..., target=...)` still builds every agent
-    under the single target passed to it.
+    See docs/mixed-target-design.md. Unset by default -- an agent with no
+    `runtime:` still just builds under whatever target it's asked to
+    (`project.build(..., target=...)` never reads this field at all, and
+    `project.build_mixed(agent, default_target=...)` falls back to
+    `default_target` for any agent that leaves it unset -- see
+    `Project.effective_runtime`). `validation._check_runtime` errors at
+    load time if it's set to an unknown target name, or to a known target
+    whose SDK isn't installed.
     """
 
 
@@ -227,6 +232,30 @@ class Project(BaseModel):
         from .adapters import get_adapter
 
         return get_adapter(target).build(self, agent_name)
+
+    def effective_runtime(self, agent_name: str, default_target: str) -> str:
+        """The SDK this agent actually builds under for a mixed build.
+
+        Resolution order (mirrors `resolve_model`'s alias-then-default
+        pattern): the agent's own `runtime:` if set, else `default_target`.
+        See docs/mixed-target-design.md, "What `runtime:` means now".
+        """
+        agent = self._require_agent(agent_name)
+        return agent.config.runtime or default_target
+
+    def build_mixed(self, agent_name: str, default_target: str) -> Any:
+        """Build a `MixedSystem` spanning every runtime `runtime:` pins agents to.
+
+        Thin delegate to `commonadk.mixed.build_mixed(...)`, mirroring how
+        `build` delegates to `adapters.get_adapter(...).build(...)` -- the
+        import is local so loading a `Project` never requires any agent SDK
+        to be installed. See docs/mixed-target-design.md for the full
+        design: agents with no `runtime:` set build under `default_target`,
+        exactly like `build()`.
+        """
+        from .mixed import build_mixed as _build_mixed
+
+        return _build_mixed(self, agent_name, default_target)
 
     def check_env(self, agent_name: str) -> list[str]:
         """Return the names of required env vars that are missing for this agent."""

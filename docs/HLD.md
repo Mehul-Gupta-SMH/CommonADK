@@ -91,9 +91,10 @@ never just the first. Checks include: bad/missing YAML, unknown YAML keys
 (`extra="forbid"` everywhere a model is populated from a `common/` file),
 tools referenced in `agent-config.yaml` but not defined in `tools.py`, tools
 missing type hints or a docstring, edges naming unknown agents, an
-unresolvable entry agent, unresolvable model aliases. A missing return-type
-hint and a set `runtime:` key are warnings, not errors — they don't block a
-load.
+unresolvable entry agent, unresolvable model aliases, a `runtime:` naming
+an unregistered target or one whose SDK isn't installed (see "Extension
+points", "Mixed-target spawning" below). A missing return-type hint is a
+warning, not an error — it doesn't block a load.
 
 **Adapt** (`adapters/`). One adapter per target SDK behind `BaseAdapter`,
 each turning an `AgentSpec` (plus everything reachable from it via
@@ -257,10 +258,17 @@ capability) can honor it without touching `interactions.yaml`. Richer
 semantics (pipelines, loops, shared state) are explicitly deferred
 (`plan.md`, "Deferred / roadmap").
 
-**Single target per build.** `project.build(agent_name, target=...)`
-instantiates the *whole* reachable interaction graph under one SDK. Mixing
-SDKs within one build is future work (see "Extension points" below); v1
-keeps the mental model simple — one call, one SDK, one live object graph.
+**Single target per `build()` call, by design — `build_mixed()` is the
+separate, opt-in entry point for more than one.** `project.build(agent_name,
+target=...)` still instantiates the *whole* reachable interaction graph
+under one SDK, unconditionally — it never reads `runtime:` at all, so this
+sentence is still true of it word for word. Spanning more than one SDK in
+one build is `project.build_mixed(agent_name, default_target=...)` (see
+"Extension points" below), a second, additive entry point rather than a
+change to `build()`'s contract — keeping the two calls separate is what
+lets every single-target project (every one that existed before this
+feature, and any new one that never sets `runtime:`) keep the simple
+mental model unchanged: one call, one SDK, one live object graph.
 
 ## Extension points
 
@@ -289,14 +297,33 @@ against).
 
 **Roadmap** (full detail in [`plan.md`](../plan.md), "Deferred / roadmap"):
 
-- **Mixed-target spawning.** Pinning individual agents to different SDKs
-  within one project (e.g. `researcher` on Google ADK, `writer` on the
-  Claude Agent SDK), instead of one target per `build()` call. `AgentConfig`
-  already reserves a `runtime:` field for this (`models.py`); it's unset in
-  every shipped agent, and `validation._check_runtime` warns — but does not
-  error — if it's set, because nothing honors it yet. Cross-SDK edges will
-  need a wire protocol between the two live agent graphs (A2A is the
-  leading candidate per `plan.md`); adapters will grow an "expose/consume
-  remote agent" path when that lands.
+- **Mixed-target spawning — shipped for the in-process case.** `runtime:`
+  (`models.py`, `AgentConfig`) now pins an individual agent to its own SDK,
+  and `project.build_mixed(agent_name, default_target=...)` builds every
+  agent reachable from `agent_name` across however many runtimes their
+  `runtime:` values name (falling back to `default_target` for any agent
+  that leaves it unset — a project that sets no agent's `runtime:` behaves
+  identically to a plain `build()` call). This composes directly with "the
+  edge-semantics spectrum" above rather than sitting beside it: agents that
+  share a runtime and are connected by `interactions.yaml` edges are still
+  built as ONE native sub-graph by that runtime's own adapter, so an ADK
+  `sub_agents` tree stays a strict tree and a LangGraph handoff stays
+  per-edge — the fidelity table above is exactly what a same-runtime
+  "island" gets. Only edges that *cross* runtimes fall outside any single
+  adapter's fidelity story; those are bridged as a plain callable tool on
+  the crossing edge's source agent (the project's core "every SDK wraps a
+  plain typed function into a tool" insight, applied one level up, from
+  `tools.py` functions to whole islands). Not every target can source such
+  a bridge — `google-adk`, `openai`, `crewai`, and `claude` can in v1;
+  `autogen` and `langgraph` cannot, for verified, SDK-specific reasons (a
+  private, unversioned tool-list attribute; a graph that's already compiled
+  by the time `build()` returns) — while every target can still be a
+  bridge's *destination*. See
+  [`mixed-target-design.md`](mixed-target-design.md) for the full design:
+  the three-layer model, the island-computation algorithm, and this
+  supported/unsupported table with its evidence. Cross-SDK edges spanning
+  two separate *processes* still need a wire protocol (A2A is the leading
+  candidate per `plan.md`) — the design doc's "Out of scope" section spells
+  out exactly where that plugs into what shipped here.
 - **Richer edge semantics** — sequential/parallel pipelines, loops, shared
   state — beyond today's `delegate`/`handoff` intersection.

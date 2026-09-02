@@ -46,26 +46,41 @@ def validate(
     _check_entry(project_config, graph, agent_configs, errors)
     if project_config is not None:
         _check_models(project_config, agent_configs, errors)
-    _check_runtime(agent_configs, warnings)
+    _check_runtime(agent_configs, errors)
 
     return errors, warnings
 
 
 def _check_runtime(
     agent_configs: dict[str, AgentConfig],
-    warnings: list[str],
+    errors: list[str],
 ) -> None:
-    # `runtime:` is reserved for future mixed-target spawning (plan.md,
-    # "Deferred / roadmap"). It is not honored in v1 -- every agent builds
-    # under the single target passed to project.build() -- so setting it is
-    # a warning, not an error.
+    # `runtime:` pins an agent to a specific SDK for mixed-target spawning
+    # (docs/mixed-target-design.md) -- honored by `Project.build_mixed`.
+    # An agent that leaves it unset is unaffected by any of this: this
+    # function only has work to do for an agent that explicitly sets it,
+    # which is what keeps `commonadk.load()` SDK-free for every project
+    # that never touches mixed-target spawning (see the design doc, "What
+    # `runtime:` means now").
+    if not any(cfg.runtime is not None for cfg in agent_configs.values()):
+        return
+
+    from .adapters import get_adapter, known_targets
+
+    targets = known_targets()
     for agent_name, cfg in agent_configs.items():
-        if cfg.runtime is not None:
-            warnings.append(
-                f"{agent_name}: `runtime:` is reserved for future mixed-target "
-                f"spawning and is not yet honored -- the agent will build "
-                f"under the target passed to project.build()"
+        if cfg.runtime is None:
+            continue
+        if cfg.runtime not in targets:
+            errors.append(
+                f"{agent_name}: unknown runtime '{cfg.runtime}'. Known "
+                f"targets: {targets}"
             )
+            continue
+        try:
+            get_adapter(cfg.runtime)
+        except ImportError as e:
+            errors.append(f"{agent_name}: {e}")
 
 
 def _check_tools(

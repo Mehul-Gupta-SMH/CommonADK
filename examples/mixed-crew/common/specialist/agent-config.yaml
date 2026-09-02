@@ -1,0 +1,16 @@
+name: specialist
+description: Handles the specialist work the coordinator routes to it.
+
+model: fast
+
+tools:
+  - summarize
+
+requires:
+  env: []
+
+# Pinned to a different runtime from the rest of the project -- this is
+# what makes this project a mixed-target build (docs/mixed-target-design.md).
+# Only project.build_mixed(...) honors this; project.build(..., target=...)
+# ignores it, same as before this feature existed.
+runtime: crewai
