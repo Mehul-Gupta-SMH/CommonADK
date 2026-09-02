@@ -77,13 +77,25 @@ jobs:
       url: https://pypi.org/project/commonadk/
     permissions:
       id-token: write
+    env:
+      # Trusted publishing is the intended path and needs no secret. If a
+      # PYPI_API_TOKEN secret exists, it wins -- an escape hatch for when
+      # the PyPI-side trusted-publisher record cannot be matched.
+      HAS_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
-      - name: Publish to PyPI
+      - name: Publish to PyPI (API token)
+        if: env.HAS_TOKEN == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Publish to PyPI (trusted publishing)
+        if: env.HAS_TOKEN != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
 
   tag:
