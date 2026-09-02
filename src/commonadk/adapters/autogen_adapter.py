@@ -186,14 +186,30 @@ same escape hatch every other adapter documents for its overrides: it needs
 to be a model this client actually knows, or the caller composes their own
 client outside `project.build(...)`.
 
-model_params: both `OpenAIChatCompletionClient` and
-`AnthropicChatCompletionClient` accept `temperature: float | None` and
-`max_tokens: int | None` as direct constructor kwargs (both are
-`TypedDict` `CreateArguments` fields, verified via `inspect.getsource` of
-each client's `config.py`), so both map directly (`_MODEL_PARAM_MAP`,
-mirroring the OpenAI Agents and CrewAI adapters). Any other key is
-warned-and-ignored, per the same policy every other adapter in this
-codebase applies to keys it doesn't map.
+model_params: `OpenAIChatCompletionClient` and `AnthropicChatCompletionClient`
+DO NOT share one parameter set -- investigated at the level that actually
+matters (the runtime whitelist each client filters constructor kwargs
+through before building its `create_args`, `_create_args_from_config` in
+each client's own module), not just each client's `CreateArguments`
+`TypedDict` type hints (which turn out to be a red herring here: passing an
+unsupported kwarg like `seed` to `AnthropicChatCompletionClient` does NOT
+raise at construction time -- it is silently accepted and then silently
+DROPPED by that filter, never reaching the Anthropic API, which is worse
+than an error if this adapter mapped it blindly). Verified directly against
+both real whitelists: `autogen_ext.models.openai._openai_client.
+create_kwargs` contains `temperature`, `max_tokens`, `top_p`, `stop`,
+`presence_penalty`, `frequency_penalty`, `seed` (no `top_k`);
+`autogen_ext.models.anthropic._anthropic_client.anthropic_message_params`
+contains `temperature`, `max_tokens`, `top_p`, `top_k`, `stop_sequences` (no
+`presence_penalty`, `frequency_penalty`, `seed`, and the key is
+`stop_sequences`, not `stop`). So this adapter maps two SEPARATE dicts,
+`_OPENAI_MODEL_PARAM_MAP` (used for the `openai`/`gemini` provider branches
+and the per-target override, all three of which build an
+`OpenAIChatCompletionClient`) and `_ANTHROPIC_MODEL_PARAM_MAP` (the
+`anthropic` provider branch only) -- unlike every flat-single-map adapter in
+this codebase. Any key absent from whichever map applies is
+warned-and-ignored, per the same policy every other adapter applies to keys
+it doesn't map.
 
 Offline construction -- a real difference from every other adapter here,
 investigated not assumed: `OpenAIChatCompletionClient`/
@@ -233,11 +249,30 @@ if TYPE_CHECKING:
 
 from .base import BaseAdapter
 
-# agent-config.yaml `model_params` key -> shared CreateArguments field name,
-# identical on both OpenAIChatCompletionClient and AnthropicChatCompletionClient.
-_MODEL_PARAM_MAP = {
+# agent-config.yaml `model_params` key -> OpenAIChatCompletionClient
+# constructor kwarg. Used for the `openai`/`gemini` provider branches and the
+# per-target override (see module docstring, "model_params").
+_OPENAI_MODEL_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_tokens",
+    "top_p": "top_p",
+    "stop": "stop",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "seed": "seed",
+}
+
+# agent-config.yaml `model_params` key -> AnthropicChatCompletionClient
+# constructor kwarg. Used for the `anthropic` provider branch only -- this
+# client's genuinely-accepted parameter set is smaller and differently named
+# (`stop` -> `stop_sequences`) than the OpenAI-family client above (see
+# module docstring, "model_params").
+_ANTHROPIC_MODEL_PARAM_MAP = {
+    "temperature": "temperature",
+    "max_tokens": "max_tokens",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "stop": "stop_sequences",
 }
 
 # Explicit model_info for the `anthropic/...` provider branch -- bypasses
@@ -308,24 +343,27 @@ class AutoGenAdapter(BaseAdapter):
     # -- model routing ------------------------------------------------------
 
     def _client_for(self, project: "Project", spec: "AgentSpec") -> Any:
-        kwargs = self._model_param_kwargs(spec)
-
         override = spec.config.targets.get("autogen", {})
         if "model" in override:
             # Per-target override: passed through as the bare model id to
             # the default client, no explicit model_info -- see module
-            # docstring, "Per-target override".
+            # docstring, "Per-target override". Always the OpenAI-family
+            # client, so the OpenAI param map applies.
+            kwargs = self._model_param_kwargs(spec, _OPENAI_MODEL_PARAM_MAP)
             return OpenAIChatCompletionClient(model=override["model"], **kwargs)
 
         resolved = project.resolve_model(spec.name)  # LiteLLM-format string
         provider, sep, rest = resolved.partition("/")
         if sep and provider == "openai":
+            kwargs = self._model_param_kwargs(spec, _OPENAI_MODEL_PARAM_MAP)
             return OpenAIChatCompletionClient(model=rest, **kwargs)
         if sep and provider == "anthropic":
+            kwargs = self._model_param_kwargs(spec, _ANTHROPIC_MODEL_PARAM_MAP)
             return AnthropicChatCompletionClient(
                 model=rest, model_info=_ANTHROPIC_MODEL_INFO, **kwargs
             )
         if sep and provider == "gemini":
+            kwargs = self._model_param_kwargs(spec, _OPENAI_MODEL_PARAM_MAP)
             return OpenAIChatCompletionClient(
                 model=rest, model_info=_GEMINI_MODEL_INFO, **kwargs
             )
@@ -343,10 +381,12 @@ class AutoGenAdapter(BaseAdapter):
             f"by autogen_ext's OpenAIChatCompletionClient."
         )
 
-    def _model_param_kwargs(self, spec: "AgentSpec") -> dict[str, Any]:
+    def _model_param_kwargs(
+        self, spec: "AgentSpec", param_map: dict[str, str]
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         for key, value in spec.config.model_params.items():
-            mapped = _MODEL_PARAM_MAP.get(key)
+            mapped = param_map.get(key)
             if mapped is None:
                 warnings.warn(
                     f"{spec.name}: model_params key '{key}' is not supported "

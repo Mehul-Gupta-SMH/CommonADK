@@ -16,7 +16,7 @@ src/commonadk/
 ├── loader.py            # common/ -> Project pipeline
 ├── validation.py         # cross-cutting checks over a loaded-but-unwrapped project
 ├── mermaid.py             # interactions.yaml -> mermaid rendering
-├── cli.py                  # argparse CLI: validate | render | run | --version
+├── cli.py                  # argparse CLI: validate | render | run | new | --version
 └── adapters/
     ├── __init__.py         # target -> adapter registry, lazy SDK imports
     ├── base.py               # BaseAdapter ABC + shared env-preflight/BFS
@@ -953,7 +953,7 @@ error, not an adapter-specific one.
 
 ## `cli.py`
 
-Three subcommands plus `--version`, built with `argparse`
+Four subcommands plus `--version`, built with `argparse`
 (`subparsers.add_parser`, `dest="command", required=True`).
 
 | Command | Args | Behavior |
@@ -961,7 +961,32 @@ Three subcommands plus `--version`, built with `argparse`
 | `validate` | `common_dir` | Loads + validates; prints project name, entry agent, and per-agent model/tools/env status (env vars flagged `set`/`not set` against the current shell, `required`/`optional`) |
 | `render` | `common_dir` | Loads + validates, then `write_interaction_layer(common_dir, project.graph)`; prints the output path |
 | `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
+| `new` | `common_dir agent_name [--from AGENT --type {delegate,handoff}]` | Scaffolds `<agent_name>/{skill.md,tools.py,agent-config.yaml}` under `common_dir`; with `--from`, also appends an edge to `interactions.yaml` and regenerates `interaction-layer.md` (see below) |
 | `--version` | — | `argparse`'s built-in `action="version"`; prints `commonadk {version}` (via `importlib.metadata.version("commonadk")`, falling back to `"0.0.0+unknown"` if the package metadata isn't found) and exits `0` via `SystemExit` |
+
+**`new` in detail.** `_cmd_new` (1) refuses outright if `common_dir/
+agent_name` already exists (`ValueError`, before touching anything else on
+disk); (2) calls `_load_project` on the project AS IT STANDS first — this
+both fails loudly if the project is already broken (matching every other
+command) and, when `--from` is given, is how that agent name is checked
+against the real, loaded agent list (`ValueError` naming the known agents
+if `--from` doesn't resolve); (3) writes the three new files from
+module-level `str.format` templates (`_NEW_AGENT_SKILL_MD`,
+`_NEW_AGENT_TOOLS_PY`, `_NEW_AGENT_CONFIG_YAML`) — the generated
+`agent-config.yaml` deliberately omits `model:` so the new agent falls back
+to `config.yaml`'s `default_model` (already required to be resolvable by
+`validation._check_models`, so this alone can never be what breaks
+`commonadk validate`), and its `name:` always matches the folder name it
+was written into; (4) when `--from` is given, reads-and-rewrites
+`interactions.yaml` (`yaml.safe_load`/`yaml.safe_dump(sort_keys=False)`,
+preserving existing key order) to append one edge, `edge_type` defaulting to
+`"delegate"`, then reloads the project and calls
+`write_interaction_layer(common_dir, project.graph)` — the SAME renderer
+`commonadk render` uses, so `interaction-layer.md` is never hand-edited,
+here or anywhere else. `--type` without `--from` is rejected up front
+(`ValueError`, "--type requires --from") before any file is touched.
+Warnings from the final reload are surfaced via `_print_warnings`, matching
+`validate`/`render`/`run`.
 
 **Lazy SDK imports.** `validate` and `render` only touch `loader.py` and
 `mermaid.py`, neither of which imports any agent SDK at module scope, so
@@ -1051,6 +1076,9 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | Agent's resolved model isn't `gemini/openai/anthropic` and no `targets.langgraph.model` override (LangGraph build) | `ValueError` | `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
 | `model_params` key unsupported by the LangGraph adapter | `UserWarning` (non-fatal) | `adapters.langgraph_adapter.LangGraphAdapter._model_param_kwargs` |
 | Missing provider API key for LangGraph's `openai`/`google_genai` chat models (eager; `anthropic` is lazy and does *not* raise here) | the underlying SDK's own error (e.g. `openai.OpenAIError`, a pydantic `ValidationError`), unwrapped | `langchain.chat_models.init_chat_model`, called from `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
+| `commonadk new`'s target agent folder already exists | `ValueError` (before any file is written) | `cli._cmd_new` |
+| `commonadk new --type` given without `--from` | `ValueError` (before any file is written) | `cli._cmd_new` |
+| `commonadk new --from` names an agent not in the (already-loaded) project | `ValueError` naming the known agents | `cli._cmd_new` |
 | Any of the above surfacing through the CLI | printed to `stderr`, exit code `1` | `cli.main`'s `try/except` |
 
 ## Testing layout
@@ -1109,3 +1137,4 @@ versions are shown below and are representative):
 | `test_adapter_langgraph.py` | Gated by `pytest.importorskip("langgraph")` and `pytest.importorskip("langchain")`. Happy-path multi-agent `StateGraph` build, bare-react-agent return for a leaf build, multi-parent and cyclic graphs via a flat node registry, duplicate edges to the same destination yielding exactly one handoff tool, gemini/openai/anthropic native routing, unsupported-provider error, per-target override, unsupported `model_params` key warned, env preflight |
 | `test_hypothesis.py` | `test_same_project_builds_on_every_installed_target`, parametrized over all six `target` strings — the v1 success criterion made executable: one `Project`, loaded once, built under whichever targets are actually installed (each case individually skipped via inline `pytest.importorskip`, not the whole file). Asserts each target's return value carries the build root's identity somewhere, under that SDK's own attribute shape (`.name` for google-adk/openai; `.system_prompt` for claude; `.manager_agent.role` for crewai; `._participant_names[0]` for autogen; `"coordinator" in .nodes` for langgraph) |
 | `test_cli.py` | In-process `cli.main(argv)` calls (no subprocess) asserting exit codes and captured stdout/stderr: `validate` (success summary incl. env set/not-set, broken project exits 1, missing folder exits 1), `render` (writes file, broken project exits 1), `run` (missing `requires.env` var, missing `ANTHROPIC_API_KEY` for `--target claude` naming that var in stderr, unknown target, unknown agent, broken project exits 1 before touching any SDK), `--version` |
+| `test_cli_new.py` | `commonadk new`: happy path (scaffolded files' shape, output passes `commonadk validate`, `interactions.yaml`/`interaction-layer.md` untouched with no `--from`), refuse-to-overwrite (an existing shipped agent and a just-scaffolded one, files left untouched either way), the `--from`/`--type` edge variant (edge appended, `interaction-layer.md` regenerated via the real renderer, default edge type is `delegate`, output passes `commonadk validate`), `--type` without `--from` rejected, unknown `--from` agent rejected (naming the known agents), broken project exits 1 before scaffolding anything, missing project folder exits 1 |

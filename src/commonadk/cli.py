@@ -1,6 +1,7 @@
 """commonadk's command-line interface.
 
-Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
+Four subcommands, mirroring plan.md ("M4 -- CLI & docs") plus the `new`
+scaffolding command added for issue #12:
 
 - `commonadk validate <common-dir>` -- load + validate a `common/` project and
   print a human-readable summary (or the error list, on failure).
@@ -9,24 +10,36 @@ Three subcommands, mirroring plan.md ("M4 -- CLI & docs"):
 - `commonadk run <common-dir> --target
   {google-adk,openai,claude,crewai,autogen,langgraph} PROMPT` -- build an
   agent for a target SDK and execute one turn.
+- `commonadk new <common-dir> <agent-name> [--from AGENT --type
+  {delegate,handoff}]` -- scaffold a new, conforming agent folder
+  (`skill.md`, `tools.py`, `agent-config.yaml`) inside an existing `common/`
+  project, optionally wiring an edge into `interactions.yaml` from an
+  existing agent and regenerating `interaction-layer.md` through
+  `mermaid.write_interaction_layer` (never hand-edited). Refuses to
+  overwrite an existing folder. The scaffolded output is designed to pass
+  `commonadk validate` immediately: no `model:` override (falls back to
+  `config.yaml`'s `default_model`, which validation already requires to be
+  resolvable), and a folder name that matches the generated `name:`.
 
 `validate` and `render` never need an agent SDK installed -- they only touch
-`loader.py`/`mermaid.py`, which have no SDK imports at module scope. `run`
-does need one, but only for the target actually requested, so every
-SDK-touching import in this module lives inside the function that uses it
-(see `_run_google_adk` / `_run_openai` / `_run_claude` / `_run_crewai` /
-`_run_autogen` / `_run_langgraph`), never at module scope. `_run_claude` additionally
-preflights `ANTHROPIC_API_KEY` itself --
-the Claude Agent SDK's bundled CLI needs it to authenticate, but (unlike
-`requires.env` in `agent-config.yaml`) nothing in the SDK declares or checks
-for it up front.
+`loader.py`/`mermaid.py`, which have no SDK imports at module scope. `new`
+is the same: scaffolding and rewiring `interactions.yaml` only ever touches
+those two modules too. `run` does need an SDK, but only for the target
+actually requested, so every SDK-touching import in this module lives
+inside the function that uses it (see `_run_google_adk` / `_run_openai` /
+`_run_claude` / `_run_crewai` / `_run_autogen` / `_run_langgraph`), never at
+module scope. `_run_claude` additionally preflights `ANTHROPIC_API_KEY`
+itself -- the Claude Agent SDK's bundled CLI needs it to authenticate, but
+(unlike `requires.env` in `agent-config.yaml`) nothing in the SDK declares
+or checks for it up front.
 
 Every command funnels its expected failure modes -- `ValidationError` (bad
 project), `OSError` (missing required env var, from the adapters' env
-preflight), `ValueError` (unknown build target, unbuildable graph), and
-`ImportError` (target SDK not installed) -- through `main`'s top-level
-`try/except`, so the CLI always prints one clean message and a non-zero exit
-code instead of a Python traceback.
+preflight), `ValueError` (unknown build target, unbuildable graph, `new`'s
+own refuse-to-overwrite / unknown `--from` agent errors), and `ImportError`
+(target SDK not installed) -- through `main`'s top-level `try/except`, so
+the CLI always prints one clean message and a non-zero exit code instead of
+a Python traceback.
 """
 
 from __future__ import annotations
@@ -35,7 +48,10 @@ import argparse
 import os
 import sys
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
+
+import yaml
 
 from .loader import load
 from .mermaid import write_interaction_layer
@@ -43,6 +59,56 @@ from .validation import ValidationError
 
 if TYPE_CHECKING:
     from .models import Project
+
+
+# ---------------------------------------------------------------------------
+# `new` scaffolding templates
+# ---------------------------------------------------------------------------
+#
+# Plain `str.format(agent=..., title=...)` templates -- literal `{`/`}` that
+# must survive into the generated file (the example tool's own f-string) are
+# doubled (`{{`/`}}`), the standard str.format escaping, since these are NOT
+# f-strings themselves: the agent name is only known at scaffold time, not
+# when this module is imported.
+
+_NEW_AGENT_SKILL_MD = """# {title}
+
+TODO: describe {agent}'s persona and what it should do when invoked.
+
+Use `example_tool` to process input before returning a final answer.
+"""
+
+_NEW_AGENT_TOOLS_PY = '''"""Tools available to the {agent} agent."""
+
+from __future__ import annotations
+
+
+def example_tool(text: str) -> str:
+    """Example tool -- replace with real logic specific to this agent.
+
+    Args:
+        text: Input text to process.
+
+    Returns:
+        A short, deterministic transformation of the input (replace with
+        real logic).
+    """
+    return f"processed: {{text}}"
+'''
+
+_NEW_AGENT_CONFIG_YAML = """name: {agent}
+description: "TODO: describe what {agent} does."
+
+tools:
+  - example_tool
+
+requires:
+  env: []
+"""
+
+
+def _title_from_agent_name(agent_name: str) -> str:
+    return agent_name.replace("_", " ").replace("-", " ").title()
 
 
 def _version() -> str:
@@ -99,6 +165,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Agent to run (default: the project's entry agent)",
     )
     run_p.add_argument("prompt", help="The user message to send")
+
+    new_p = subparsers.add_parser(
+        "new", help="Scaffold a new agent folder inside an existing common/ project"
+    )
+    new_p.add_argument("common_dir", help="Path to the project's common/ folder")
+    new_p.add_argument("agent_name", help="Name for the new agent (becomes its folder name)")
+    new_p.add_argument(
+        "--from",
+        dest="from_agent",
+        default=None,
+        metavar="AGENT",
+        help="Existing agent to add an outgoing edge from, into the new agent",
+    )
+    new_p.add_argument(
+        "--type",
+        dest="edge_type",
+        choices=["delegate", "handoff"],
+        default=None,
+        metavar="{delegate,handoff}",
+        help="Edge type for --from (default: delegate); requires --from",
+    )
 
     return parser
 
@@ -171,6 +258,77 @@ def _cmd_render(common_dir: str) -> int:
     project, caught_warnings = _load_project(common_dir)
     out_path = write_interaction_layer(common_dir, project.graph)
     print(f"Wrote {out_path}")
+    _print_warnings(caught_warnings)
+    return 0
+
+
+def _cmd_new(
+    common_dir: str,
+    agent_name: str,
+    from_agent: Optional[str],
+    edge_type: Optional[str],
+) -> int:
+    if edge_type is not None and from_agent is None:
+        raise ValueError("commonadk: --type requires --from")
+
+    common_path = Path(common_dir)
+    agent_dir = common_path / agent_name
+    if agent_dir.exists():
+        raise ValueError(
+            f"commonadk: refusing to overwrite existing agent folder "
+            f"{agent_dir} -- choose a different name or remove it first"
+        )
+
+    # Load (and therefore validate) the project as it stands BEFORE
+    # scaffolding anything -- this both fails loudly if the project is
+    # already broken (matching every other command's behavior) and, when
+    # --from is given, is how its agent name is checked against the real
+    # agent list.
+    project, _ = _load_project(common_dir)
+    if from_agent is not None and from_agent not in project.agents:
+        raise ValueError(
+            f"commonadk: unknown --from agent {from_agent!r}. Known agents: "
+            f"{sorted(project.agents)}"
+        )
+
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "skill.md").write_text(
+        _NEW_AGENT_SKILL_MD.format(
+            agent=agent_name, title=_title_from_agent_name(agent_name)
+        )
+    )
+    (agent_dir / "tools.py").write_text(_NEW_AGENT_TOOLS_PY.format(agent=agent_name))
+    (agent_dir / "agent-config.yaml").write_text(
+        _NEW_AGENT_CONFIG_YAML.format(agent=agent_name)
+    )
+
+    created = [
+        agent_dir / "skill.md",
+        agent_dir / "tools.py",
+        agent_dir / "agent-config.yaml",
+    ]
+
+    if from_agent is not None:
+        interactions_path = common_path / "interactions.yaml"
+        data = yaml.safe_load(interactions_path.read_text()) or {}
+        data.setdefault("edges", []).append(
+            {"from": from_agent, "to": agent_name, "type": edge_type or "delegate"}
+        )
+        interactions_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        created.append(interactions_path)
+
+    # Reload the now-scaffolded project (never hand-edit the generated
+    # interaction-layer.md -- regenerate it through the same renderer
+    # `commonadk render` uses) and surface any warnings, matching every
+    # other command's pattern.
+    project, caught_warnings = _load_project(common_dir)
+    if from_agent is not None:
+        out_path = write_interaction_layer(common_dir, project.graph)
+        created.append(out_path)
+
+    print(f"Created agent '{agent_name}' in {agent_dir}:")
+    for path in created:
+        print(f"  {path}")
     _print_warnings(caught_warnings)
     return 0
 
@@ -349,6 +507,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_render(args.common_dir)
         if args.command == "run":
             return _cmd_run(args.common_dir, args.target, args.agent, args.prompt)
+        if args.command == "new":
+            return _cmd_new(
+                args.common_dir, args.agent_name, args.from_agent, args.edge_type
+            )
         parser.print_help()
         return 1
     except ValidationError as e:

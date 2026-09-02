@@ -304,14 +304,127 @@ def test_per_target_override_wins(tmp_project, tavily_env, provider_keys_env):
     assert client._create_args["model"] == "gpt-4o-mini"
 
 
-def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env, provider_keys_env):
+def test_openai_family_model_params_land_on_client(tmp_project, tavily_env, provider_keys_env):
+    """Every key in `_OPENAI_MODEL_PARAM_MAP` must land on the built
+    `OpenAIChatCompletionClient`'s `_create_args` (writer's base model, the
+    `fast` alias, resolves to gemini/... which also routes through this
+    client -- see module docstring, 'Model routing').
+    """
     writer_cfg = tmp_project / "writer" / "agent-config.yaml"
     data = yaml.safe_load(writer_cfg.read_text())
-    data["model_params"]["top_p"] = 0.9
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+    }
     writer_cfg.write_text(yaml.safe_dump(data))
 
     project = commonadk.load(tmp_project)
-    with pytest.warns(UserWarning, match="model_params key 'top_p'"):
+    agent = project.build("writer", target="autogen")
+
+    client = agent._model_client
+    assert isinstance(client, OpenAIChatCompletionClient)
+    args = client._create_args
+    assert args["temperature"] == 0.3
+    assert args["max_tokens"] == 2048
+    assert args["top_p"] == 0.9
+    assert args["stop"] == ["END"]
+    assert args["presence_penalty"] == 0.1
+    assert args["frequency_penalty"] == 0.2
+    assert args["seed"] == 42
+
+
+def test_openai_family_top_k_is_deliberately_unmapped(
+    tmp_project, tavily_env, provider_keys_env
+):
+    """`top_k` isn't in `autogen_ext`'s own OpenAI-client whitelist
+    (`create_kwargs`, see module docstring, 'model_params') -- must warn,
+    not silently reach the client.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"]["top_k"] = 40
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match="model_params key 'top_k'"):
+        agent = project.build("writer", target="autogen")
+
+    assert "top_k" not in agent._model_client._create_args
+
+
+def test_anthropic_model_params_land_on_client(tmp_project, tavily_env, provider_keys_env):
+    """Every key in `_ANTHROPIC_MODEL_PARAM_MAP` must land on the built
+    `AnthropicChatCompletionClient`'s `_create_args`, including the
+    `stop` -> `stop_sequences` rename (see module docstring, 'model_params').
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "smart"  # -> anthropic/claude-sonnet-5
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stop": ["END"],
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    agent = project.build("writer", target="autogen")
+
+    client = agent._model_client
+    assert isinstance(client, AnthropicChatCompletionClient)
+    args = client._create_args
+    assert args["temperature"] == 0.3
+    assert args["max_tokens"] == 2048
+    assert args["top_p"] == 0.9
+    assert args["top_k"] == 40
+    assert args["stop_sequences"] == ["END"]
+
+
+@pytest.mark.parametrize(
+    "unsupported_key", ["presence_penalty", "frequency_penalty", "seed"]
+)
+def test_anthropic_openai_only_keys_are_deliberately_unmapped(
+    tmp_project, tavily_env, provider_keys_env, unsupported_key
+):
+    """`presence_penalty`/`frequency_penalty`/`seed` aren't in
+    `autogen_ext`'s Anthropic-client whitelist (`anthropic_message_params`,
+    see module docstring, 'model_params') -- passing them to
+    `AnthropicChatCompletionClient` doesn't raise, it silently drops them
+    (verified directly), which is exactly why this adapter must warn at
+    `build()` time instead of letting them vanish unnoticed.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "smart"  # -> anthropic/claude-sonnet-5
+    data["model_params"][unsupported_key] = 0.5
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match=f"model_params key '{unsupported_key}'"):
+        agent = project.build("writer", target="autogen")
+
+    assert unsupported_key not in agent._model_client._create_args
+
+
+def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env, provider_keys_env):
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    # "stop_sequences" is a plausible-looking but wrong key -- this
+    # adapter's canonical key is "stop" (see autogen_adapter.py's module
+    # docstring, "model_params"); genuinely unsupported on both the
+    # OpenAI-family and Anthropic param maps.
+    data["model_params"]["stop_sequences"] = ["END"]
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match="model_params key 'stop_sequences'"):
         agent = project.build("writer", target="autogen")
 
     assert agent is not None  # build still succeeds

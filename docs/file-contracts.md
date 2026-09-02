@@ -235,21 +235,65 @@ LiteLLM fallback, so without this override the build fails with a clear
 ### `model_params` — what each adapter actually maps
 
 `model_params` is a free-form `dict[str, Any]` at the schema level; each
-adapter maps a fixed, small set of keys and warns (does not error) on
-anything else:
+adapter maps a fixed set of keys — verified directly against the installed
+SDK's real classes (constructor signatures, `model_fields`, and, where a
+client filters its constructor kwargs through its own runtime whitelist
+before making a request, that whitelist, not just its type hints — see
+AutoGen and LangGraph below) — and warns (does not error) on anything else:
 
 | `model_params` key | Google ADK | OpenAI Agents | Claude Agent SDK | CrewAI | AutoGen | LangGraph |
 |---|---|---|---|---|---|---|
-| `temperature` | `GenerateContentConfig.temperature` | `ModelSettings.temperature` | *(none supported)* | `LLM(temperature=...)` | `temperature` client kwarg | `init_chat_model(temperature=...)` |
-| `max_tokens` | `GenerateContentConfig.max_output_tokens` | `ModelSettings.max_tokens` | *(none supported)* | `LLM(max_tokens=...)` | `max_tokens` client kwarg | `init_chat_model(max_tokens=...)` |
+| `temperature` | `GenerateContentConfig.temperature` | `ModelSettings.temperature` | *(none supported)* | `LLM(temperature=...)` | `temperature` client kwarg (all providers) | `init_chat_model(temperature=...)` (all providers) |
+| `max_tokens` | `GenerateContentConfig.max_output_tokens` | `ModelSettings.max_tokens` | *(none supported)* | `LLM(max_tokens=...)` | `max_tokens` client kwarg (all providers) | `init_chat_model(max_tokens=...)` (all providers) |
+| `top_p` | `GenerateContentConfig.top_p` | `ModelSettings.top_p` | *(none supported)* | `LLM(top_p=...)` | `top_p` client kwarg (all providers) | `init_chat_model(top_p=...)` (all providers) |
+| `top_k` | `GenerateContentConfig.top_k` | *(unsupported — no field on `ModelSettings`)* | *(none supported)* | *(unsupported — Gemini-only on CrewAI's own classes, not a field CrewAI's OpenAI/Anthropic completion classes share, so not mapped)* | `top_k` client kwarg — **anthropic provider only** (OpenAI-family client has no `top_k`) | `init_chat_model(top_k=...)` — **gemini and anthropic providers only** (`ChatOpenAI` has no `top_k`) |
+| `stop` | `GenerateContentConfig.stop_sequences` | *(unsupported — no field on `ModelSettings`)* | *(none supported)* | `LLM(stop=...)` | `stop` client kwarg for openai/gemini; `stop_sequences` client kwarg for anthropic | `init_chat_model(stop=...)` (all three providers — resolves to each one's own field via a pydantic alias, same mechanism as `max_tokens` on the gemini provider) |
+| `presence_penalty` | `GenerateContentConfig.presence_penalty` | `ModelSettings.presence_penalty` | *(none supported)* | `LLM(presence_penalty=...)` | `presence_penalty` client kwarg — **openai/gemini only** (anthropic client has no such field) | `init_chat_model(presence_penalty=...)` — **openai and gemini providers only** |
+| `frequency_penalty` | `GenerateContentConfig.frequency_penalty` | `ModelSettings.frequency_penalty` | *(none supported)* | `LLM(frequency_penalty=...)` | `frequency_penalty` client kwarg — **openai/gemini only** | `init_chat_model(frequency_penalty=...)` — **openai and gemini providers only** |
+| `seed` | `GenerateContentConfig.seed` | *(unsupported — no field on `ModelSettings`)* | *(none supported)* | `LLM(seed=...)` | `seed` client kwarg — **openai/gemini only** | `init_chat_model(seed=...)` — **openai and gemini providers only** |
 | anything else | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time | ignored, `UserWarning` at build time |
 
 The Claude Agent SDK exposes no per-request sampling controls analogous to
-`temperature`/`max_tokens` anywhere in `claude_agent_sdk.types` (verified
-directly — its closest fields, `thinking`/`effort`/`max_thinking_tokens`/
-`max_turns`, are reasoning-effort and turn-budget controls, not sampling
-parameters), so **every** `model_params` key is warned-and-ignored for that
-target, not just the ones outside this table.
+any of the keys above anywhere in `claude_agent_sdk.types` (verified
+directly, re-checked against this project's full candidate list — its
+closest fields, `thinking`/`effort`/`max_thinking_tokens`/`max_turns`, are
+reasoning-effort and turn-budget controls, not sampling parameters), so
+**every** `model_params` key is warned-and-ignored for that target, not
+just the ones outside this table.
+
+**Google ADK and CrewAI map a single flat set** (`GenerateContentConfig` is
+one config object with no per-provider split; CrewAI's `LLM` factory routes
+to one of several native completion classes, but `temperature`, `max_tokens`,
+`top_p`, `stop`, `presence_penalty`, `frequency_penalty`, and `seed` are
+real fields on every one of them — `top_k` is the one exception, present
+only on the Gemini completion class, so it stays unmapped rather than
+working for some providers and silently no-op-ing for others).
+
+**AutoGen and LangGraph map per underlying provider client instead**, because
+their native clients genuinely accept different parameter sets — this
+matters more than it sounds: passing an unmapped key straight through to
+`ChatOpenAI`/`ChatAnthropic` (LangGraph) does not raise or warn on its own,
+it silently reroutes into `model_kwargs` and gets forwarded to the real API
+call (verified directly, e.g. `ChatAnthropic(model=..., seed=42)`
+constructs "successfully" with `seed` stashed in `model_kwargs`, which the
+real Anthropic API rejects); AutoGen's `AnthropicChatCompletionClient` is
+similar but the opposite failure mode — an unmapped key is silently
+*dropped* before it ever reaches the client's own request-building code
+(verified against `autogen_ext.models.anthropic._anthropic_client.
+anthropic_message_params`, the actual runtime whitelist, not just the
+`CreateArguments` `TypedDict`'s type hints, which list `seed` even though
+it is not honored). Either way, mapping a key that isn't genuinely supported
+would silently defer a build-time problem to run time (or make it disappear
+entirely) — the opposite of this codebase's warn-and-ignore contract, which
+is deliberately a *build-time* signal. So both adapters keep one param map
+per provider (`_OPENAI_MODEL_PARAM_MAP`/`_ANTHROPIC_MODEL_PARAM_MAP` in
+`autogen_adapter.py`; `_PARAM_MAP_BY_PROVIDER`, keyed `openai`/`anthropic`/
+`google_genai`, in `langgraph_adapter.py`) instead of one flat map. For
+LangGraph specifically, a `targets.langgraph.model` override whose provider
+prefix is one of the three known ones uses that provider's own full map;
+an override to any other provider falls back to `temperature`/`max_tokens`
+only — the sole two keys ever verified universal across every provider this
+adapter has actually constructed and inspected.
 
 ## `common/<agent>/skill.md`
 

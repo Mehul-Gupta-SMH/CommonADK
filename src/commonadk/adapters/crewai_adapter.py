@@ -122,13 +122,19 @@ override handling.
 
 model_params: `crewai.LLM` (and every native provider subclass it can
 resolve to -- verified against `GeminiCompletion`, `AnthropicCompletion`,
-`OpenAICompletion`) exposes `temperature: float | None` and
-`max_tokens: int | float | None` as real constructor fields, so both map
-directly (`_MODEL_PARAM_MAP`, mirroring the OpenAI Agents adapter's
-`ModelSettings` mapping). Any other `model_params` key (e.g. `top_p`, which
-`LLM` also happens to expose, but which plan.md's M6 spec does not ask this
-adapter to wire up) is warned-and-ignored, per the same policy the other
-three adapters apply to whichever keys they don't map.
+`OpenAICompletion`, AND the base `crewai.llm.LLM` class used for the litellm
+fallback path, via each class's `model_fields`) exposes `temperature`,
+`max_tokens`, `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, and
+`seed` as real pydantic fields on EVERY one of those four classes -- so all
+seven map directly (`_MODEL_PARAM_MAP`), each verified by actually
+constructing an `LLM(...)` with all seven kwargs set and reading the
+resulting instance's attributes back (not just checking `model_fields`
+exists). `top_k` is deliberately NOT mapped: only `GeminiCompletion` among
+the four classes declares it (`OpenAICompletion`, `AnthropicCompletion`, and
+the base `LLM` class do not), so it isn't safe to route uniformly for a
+`model_params` key that can resolve to any of CrewAI's supported providers --
+it falls through to the warn-and-ignore path below, same as any other
+adapter's genuinely-unsupported keys.
 
 Tool wiring: each `ToolSpec`'s plain, typed, documented `tools.py` function
 is wrapped with `crewai.tools.tool(func)` -- the SDK's own function-tool
@@ -166,10 +172,18 @@ if TYPE_CHECKING:
 
 from .base import BaseAdapter
 
-# agent-config.yaml `model_params` key -> crewai.LLM field
+# agent-config.yaml `model_params` key -> crewai.LLM field. See module
+# docstring, "model_params" -- verified across GeminiCompletion,
+# AnthropicCompletion, OpenAICompletion, and the base litellm-fallback LLM
+# class. `top_k` deliberately excluded (Gemini-only, not universal).
 _MODEL_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_tokens",
+    "top_p": "top_p",
+    "stop": "stop",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "seed": "seed",
 }
 
 

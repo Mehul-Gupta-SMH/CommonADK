@@ -34,10 +34,22 @@ if TYPE_CHECKING:
 
 from .base import BaseAdapter
 
-# agent-config.yaml `model_params` key -> google.genai.types.GenerateContentConfig field
+# agent-config.yaml `model_params` key -> google.genai.types.GenerateContentConfig
+# field. `GenerateContentConfig.model_fields` (google-adk 2.7.1) was
+# introspected directly to confirm every key below is a real field -- this is
+# the one adapter in this codebase where every candidate sampling param
+# (top_p, top_k, stop, presence_penalty, frequency_penalty, seed) genuinely
+# has a matching field, since GenerateContentConfig is a single flat config
+# object with no per-provider client split (see module docstring).
 _MODEL_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_output_tokens",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "stop": "stop_sequences",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "seed": "seed",
 }
 
 

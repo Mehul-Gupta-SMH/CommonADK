@@ -85,13 +85,19 @@ Or from the command line:
 commonadk validate examples/research-crew/common
 commonadk render examples/research-crew/common
 commonadk run examples/research-crew/common --target openai "Research electric vehicle adoption"
+commonadk new examples/research-crew/common reviewer --from writer --type handoff
 ```
 
 `validate` loads and checks a project, printing each agent's resolved model,
 tools, and required env vars (flagging which are actually set in your
 shell). `render` regenerates `interaction-layer.md` from `interactions.yaml`
 so the diagram never drifts from the spec. `run` builds one agent for a
-target SDK and executes a single turn — this one needs real API keys.
+target SDK and executes a single turn — this one needs real API keys. `new`
+scaffolds a conforming agent folder (`skill.md`, `tools.py`, `agent-
+config.yaml`) inside an existing `common/` — output that passes `commonadk
+validate` immediately — and refuses to overwrite an existing folder;
+`--from <agent> --type {delegate,handoff}` additionally appends an edge to
+`interactions.yaml` and regenerates `interaction-layer.md` for you.
 
 For a runnable, offline tour of all of the above — including `project.build()`
 against all six targets and real captured CLI output — see

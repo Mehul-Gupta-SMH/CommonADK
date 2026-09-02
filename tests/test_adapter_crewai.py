@@ -247,14 +247,69 @@ def test_per_target_override_wins(tmp_project, tavily_env):
     assert crew.agents[0].llm.model == "claude-opus-5"  # native anthropic routing
 
 
-def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env):
+def test_mapped_model_params_land_on_llm(tmp_project, tavily_env):
+    """Every mapped model_params key (see crewai_adapter.py's module
+    docstring and `_MODEL_PARAM_MAP`) must land on the built `LLM`
+    instance's own attributes -- verified against the actual native
+    `GeminiCompletion` object writer's model resolves to, not just the
+    base `LLM` class.
+    """
     writer_cfg = tmp_project / "writer" / "agent-config.yaml"
     data = yaml.safe_load(writer_cfg.read_text())
-    data["model_params"]["top_p"] = 0.9
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+    }
     writer_cfg.write_text(yaml.safe_dump(data))
 
     project = commonadk.load(tmp_project)
-    with pytest.warns(UserWarning, match="model_params key 'top_p'"):
+    crew = project.build("writer", target="crewai")
+
+    llm = crew.agents[0].llm
+    assert llm.temperature == 0.3
+    assert llm.max_tokens == 2048
+    assert llm.top_p == 0.9
+    assert llm.stop == ["END"]
+    assert llm.presence_penalty == 0.1
+    assert llm.frequency_penalty == 0.2
+    assert llm.seed == 42
+
+
+def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env):
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    # "stop_sequences" is a plausible-looking but wrong key -- this
+    # adapter's canonical key is "stop" (crewai's own LLM field name; see
+    # crewai_adapter.py's module docstring, "model_params").
+    data["model_params"]["stop_sequences"] = ["END"]
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match="model_params key 'stop_sequences'"):
+        crew = project.build("writer", target="crewai")
+
+    assert crew is not None  # build still succeeds
+
+
+def test_top_k_is_deliberately_unmapped(tmp_project, tavily_env):
+    """`top_k` is only a field on `GeminiCompletion`, not on
+    `OpenAICompletion`/`AnthropicCompletion`/the base litellm-fallback `LLM`
+    class (see crewai_adapter.py's module docstring, "model_params") -- it
+    must warn-and-ignore here even though writer's own resolved model
+    (gemini) happens to be the one provider that *would* accept it.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"]["top_k"] = 40
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match="model_params key 'top_k'"):
         crew = project.build("writer", target="crewai")
 
     assert crew is not None  # build still succeeds
