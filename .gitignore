@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Agent worktrees created by the Claude Code harness (never part of the project)
+.claude/worktrees/
