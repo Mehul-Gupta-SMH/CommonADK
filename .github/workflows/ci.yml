@@ -1,9 +1,28 @@
 name: CI
 
-# Minimal CI (issue #6): core-only install, single job. Adapter tests
-# `pytest.importorskip` their target SDK at module scope, so they skip
-# cleanly here instead of failing -- by design, see tests/test_adapter_*.py.
-# The full per-extra / all-extras matrix stays with issue #6.
+# Full CI matrix (issue #6):
+#   - core: `pip install -e ".[dev]"` only, no SDK extras -- proves the core
+#     stays SDK-free. Adapter tests `pytest.importorskip` their target SDK
+#     at module scope, so they skip cleanly here instead of failing -- by
+#     design, see tests/test_adapter_*.py.
+#   - extras: one leg per adapter's own extra (google, openai, claude,
+#     crewai, autogen, langgraph), `pip install -e ".[dev,<extra>]"` each --
+#     proves every adapter works in isolation, with no other extra's
+#     dependencies around to mask a missing pin. `fail-fast: false` so one
+#     flaky/broken SDK doesn't cancel and mask the others' results.
+#   - all-extras: every extra installed together -- the shape this repo's
+#     own local dev environment resolves to, and the leg most exposed to
+#     upstream pin churn across extras (crewai pins openai<3; autogen-core
+#     pins protobuf~=5.29 -- see pyproject.toml's `autogen` extra comment
+#     for why that's currently harmless). `continue-on-error: true`: this
+#     job guards a known-fragile, cross-extra dependency resolution that
+#     this project doesn't fully control, so a transient break here is a
+#     signal to investigate, not a reason to block every PR -- `core` and
+#     the per-extra `extras` matrix above are what actually gate merges.
+#
+# Python 3.11 only, for all jobs -- a version matrix is out of scope here
+# (keep this simple; revisit if/when this project needs to guarantee a
+# specific Python version range).
 
 on:
   push:
@@ -11,8 +30,12 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +43,54 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
-      - name: Install commonadk (core + dev)
+      - name: Install commonadk (core + dev, no SDK extras)
         run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python3 -m pytest -q
+
+  extras:
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [google, openai, claude, crewai, autogen, langgraph]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install commonadk (dev + ${{ matrix.extra }})
+        run: pip install -e ".[dev,${{ matrix.extra }}]"
+
+      - name: Run tests
+        run: python3 -m pytest -q
+
+  all-extras:
+    # Every extra installed together -- see the header comment above for why
+    # this is continue-on-error: it guards a known-fragile cross-extra
+    # dependency resolution and must not block PRs on upstream pin churn
+    # this project doesn't control.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install commonadk (dev + every extra)
+        run: pip install -e ".[dev,google,openai,claude,crewai,autogen,langgraph]"
 
       - name: Run tests
         run: python3 -m pytest -q

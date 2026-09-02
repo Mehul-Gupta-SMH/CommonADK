@@ -1,0 +1,13 @@
+name: coordinator
+description: Greets the user and routes work to the specialist agent.
+
+model: fast
+
+tools:
+  - greet
+
+requires:
+  env: []
+
+# No `runtime:` -- builds under whatever target project.build_mixed's
+# default_target names (this example uses "google-adk").

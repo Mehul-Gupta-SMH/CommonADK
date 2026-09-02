@@ -12,6 +12,7 @@ complements, rather than replaces, the docs at the repo root.
 | [`LLD.md`](LLD.md) | Low-level design: module-by-module contracts for every file in `src/commonadk/` — models, loader pipeline, validation checks, mermaid rendering, all six adapters, the CLI, the full error taxonomy, and what each test file covers |
 | [`file-contracts.md`](file-contracts.md) | The authoritative reference for authoring a `common/` folder — every file's field table (name, type, required, default, meaning), validation rules, per-target `model` override forms, and a fully annotated example drawn from the shipped project |
 | [`demo-runs.md`](demo-runs.md) | Demo runs: real, captured (not fabricated) output from `commonadk --version`, `validate`, `render`, [`examples/demo.py`](../examples/demo.py) (all six targets built offline), and the clean missing-env error — plus which env vars a live `commonadk run` needs per target |
+| [`mixed-target-design.md`](mixed-target-design.md) | Mixed-target spawning: pinning individual agents to different SDKs (`runtime:`) within one in-process build — the three-layer model (per-agent build → per-runtime "island" → coordinator), the island-computation algorithm, the verified supported/unsupported cross-runtime source targets, failure modes, and exactly where a future networked/A2A path would attach |
 
 Outside this folder:
 

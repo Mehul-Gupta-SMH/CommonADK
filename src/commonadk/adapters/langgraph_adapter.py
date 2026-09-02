@@ -160,18 +160,45 @@ native form, passed through as-is" policy for overrides. If the provider
 half isn't one `init_chat_model` recognizes (or its package isn't
 installed), the SDK's own clear error surfaces unwrapped.
 
-model_params: verified via direct construction that `temperature` and
-`max_tokens` are accepted as constructor/`init_chat_model` kwargs
-IDENTICALLY across all three shipped providers -- `ChatOpenAI` and
-`ChatAnthropic` both declare a real `max_tokens` field, and
+model_params: `temperature` and `max_tokens` are accepted as constructor/
+`init_chat_model` kwargs IDENTICALLY across all three shipped providers --
+`ChatOpenAI` and `ChatAnthropic` both declare a real `max_tokens` field, and
 `ChatGoogleGenerativeAI` declares `max_output_tokens` but with a pydantic
 `validation_alias="max_tokens"` AND `populate_by_name=True` (verified via
 `model_fields`/`model_config`), so passing the keyword `max_tokens=...`
-resolves correctly on all three -- no per-provider kwarg remapping is
-needed, unlike AutoGen's shared-but-separately-typed clients (`_MODEL_
-PARAM_MAP` below is a single flat map for exactly this reason). Any other
-`model_params` key is warned-and-ignored, per this codebase's established
-policy.
+resolves correctly on all three. The broader candidate set (`top_p`,
+`top_k`, `stop`, `presence_penalty`, `frequency_penalty`, `seed`) does NOT
+extend uniformly, though -- verified by direct construction, not assumed:
+`ChatOpenAI.model_fields` has `top_p`, `stop` (aliased from/to
+`stop_sequences` the same way `max_tokens` is), `presence_penalty`,
+`frequency_penalty`, `seed`, but no `top_k`; `ChatAnthropic.model_fields`
+has `top_p`, `top_k`, `stop_sequences` (aliased the other way, so the
+keyword `stop=` still resolves correctly there too), but no
+`presence_penalty`/`frequency_penalty`/`seed`; `ChatGoogleGenerativeAI`
+supports the full set, `top_k` included. CRITICALLY, passing a genuinely
+unsupported key to `ChatOpenAI`/`ChatAnthropic` does NOT raise and does NOT
+warn through this codebase's own policy -- langchain's own pydantic model
+config silently reroutes any kwarg that isn't a declared field into
+`model_kwargs` (with its own separate `UserWarning`, "... is not default
+parameter ... transferred to model_kwargs"), which then gets forwarded
+straight into the underlying API call, verified directly (e.g.
+`ChatAnthropic(model=..., seed=42)` constructs "successfully" but silently
+stashes `seed` in `model_kwargs`, which the real Anthropic API does not
+accept). So mapping a key this adapter cannot verify for a given provider
+would silently produce a build that fails (or is silently ignored) at
+*call* time instead of *build* time -- the opposite of this codebase's
+warn-and-ignore contract, which is deliberately a *build-time* signal. This
+adapter therefore uses THREE separate per-provider maps
+(`_PARAM_MAP_BY_PROVIDER`, keyed by the same `google_genai`/`openai`/
+`anthropic` names `_PROVIDER_MAP` produces) instead of one flat map, unlike
+what an earlier version of this docstring claimed for the narrower
+temperature/max_tokens-only mapping. A `targets.langgraph.model` override
+to a provider prefix outside this adapter's known three (see "Per-target
+override" above) falls back to `_DEFAULT_MODEL_PARAM_MAP` -- just
+`temperature`/`max_tokens`, the only two keys this adapter has ever verified
+universally -- since nothing here can safely assume a broader set applies to
+an arbitrary, unshipped provider. Any key absent from whichever map applies
+is warned-and-ignored, per this codebase's established policy.
 
 Tool wiring: each `ToolSpec`'s plain, typed, documented `tools.py` function
 is passed straight through as a bare callable in the `tools=[...]` list --
@@ -213,12 +240,44 @@ if TYPE_CHECKING:
 
 from .base import BaseAdapter
 
-# agent-config.yaml `model_params` key -> init_chat_model kwarg. One flat
-# map for all three providers -- see module docstring, "model_params": the
-# google_genai provider resolves the same `max_tokens` keyword via a
-# pydantic validation_alias, so no per-provider remapping is needed here,
-# unlike autogen_adapter.py.
-_MODEL_PARAM_MAP = {
+# agent-config.yaml `model_params` key -> init_chat_model kwarg, one map per
+# langchain provider name (see module docstring, "model_params" -- each
+# provider's chat model class genuinely accepts a different parameter set,
+# verified by direct construction, not just by field-name grepping).
+_PARAM_MAP_BY_PROVIDER: dict[str, dict[str, str]] = {
+    "google_genai": {
+        "temperature": "temperature",
+        "max_tokens": "max_tokens",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "stop": "stop",
+        "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty",
+        "seed": "seed",
+    },
+    "openai": {
+        "temperature": "temperature",
+        "max_tokens": "max_tokens",
+        "top_p": "top_p",
+        "stop": "stop",
+        "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty",
+        "seed": "seed",
+    },
+    "anthropic": {
+        "temperature": "temperature",
+        "max_tokens": "max_tokens",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "stop": "stop",
+    },
+}
+
+# Fallback for a `targets.langgraph.model` override whose provider prefix
+# isn't one of the three above (see module docstring, "model_params") --
+# only the two keys ever verified universal, across every provider this
+# adapter has actually constructed and inspected.
+_DEFAULT_MODEL_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_tokens",
 }
@@ -314,19 +373,26 @@ class LangGraphAdapter(BaseAdapter):
     # -- model routing ------------------------------------------------------
 
     def _model_for(self, project: "Project", spec: "AgentSpec") -> Any:
-        kwargs = self._model_param_kwargs(spec)
-
         override = spec.config.targets.get("langgraph", {})
         if "model" in override:
             # Per-target override: already langchain-native "provider:model"
             # form, passed through as-is -- see module docstring, "Per-
-            # target override".
+            # target override". Use that override's own provider prefix's
+            # param map when it's one of the three this adapter knows,
+            # else the conservative default (see module docstring,
+            # "model_params").
+            override_provider, _, _ = override["model"].partition(":")
+            param_map = _PARAM_MAP_BY_PROVIDER.get(
+                override_provider, _DEFAULT_MODEL_PARAM_MAP
+            )
+            kwargs = self._model_param_kwargs(spec, param_map)
             return init_chat_model(override["model"], **kwargs)
 
         resolved = project.resolve_model(spec.name)  # LiteLLM-format string
         provider, sep, rest = resolved.partition("/")
         lc_provider = _PROVIDER_MAP.get(provider) if sep else None
         if lc_provider is not None:
+            kwargs = self._model_param_kwargs(spec, _PARAM_MAP_BY_PROVIDER[lc_provider])
             return init_chat_model(f"{lc_provider}:{rest}", **kwargs)
 
         raise ValueError(
@@ -343,10 +409,12 @@ class LangGraphAdapter(BaseAdapter):
             f"understood by `init_chat_model`."
         )
 
-    def _model_param_kwargs(self, spec: "AgentSpec") -> dict[str, Any]:
+    def _model_param_kwargs(
+        self, spec: "AgentSpec", param_map: dict[str, str]
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         for key, value in spec.config.model_params.items():
-            mapped = _MODEL_PARAM_MAP.get(key)
+            mapped = param_map.get(key)
             if mapped is None:
                 warnings.warn(
                     f"{spec.name}: model_params key '{key}' is not supported "

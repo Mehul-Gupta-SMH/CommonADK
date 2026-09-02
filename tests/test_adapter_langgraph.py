@@ -335,14 +335,184 @@ def test_per_target_override_wins(tmp_project, provider_keys_env):
     assert model.model_name == "gpt-4o-mini"
 
 
-def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env, provider_keys_env):
+def test_gemini_full_candidate_set_lands_on_chat_model(tmp_project, provider_keys_env):
+    """`google_genai` is the one provider here that genuinely accepts every
+    candidate key (see module docstring, "model_params") -- all of them must
+    land on the built `ChatGoogleGenerativeAI`.
+    """
     writer_cfg = tmp_project / "writer" / "agent-config.yaml"
     data = yaml.safe_load(writer_cfg.read_text())
-    data["model_params"]["top_p"] = 0.9
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    model = LangGraphAdapter()._model_for(project, project.agents["writer"])
+
+    assert isinstance(model, ChatGoogleGenerativeAI)
+    assert model.temperature == 0.3
+    assert model.max_output_tokens == 2048
+    assert model.top_p == 0.9
+    assert model.top_k == 40
+    assert model.stop == ["END"]
+    assert model.presence_penalty == 0.1
+    assert model.frequency_penalty == 0.2
+    assert model.seed == 42
+
+
+def test_openai_provider_top_k_is_deliberately_unmapped(tmp_project, provider_keys_env):
+    """`ChatOpenAI` has no `top_k` field (see module docstring,
+    "model_params") -- must warn, not silently land in `model_kwargs`.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "openai/gpt-4o"
+    data["model_params"] = {
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+        "top_k": 40,
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    with pytest.warns(UserWarning, match="model_params key 'top_k'"):
+        model = LangGraphAdapter()._model_for(project, project.agents["writer"])
+
+    assert isinstance(model, ChatOpenAI)
+    assert model.temperature == 0.3
+    assert model.top_p == 0.9
+    assert model.stop == ["END"]
+    assert model.presence_penalty == 0.1
+    assert model.frequency_penalty == 0.2
+    assert model.seed == 42
+    # top_k must never have reached the client at all -- not even stashed
+    # in model_kwargs (see module docstring: unmapped kwargs silently land
+    # there and get forwarded to the real API, which is exactly what the
+    # warn-and-ignore policy exists to prevent).
+    assert "top_k" not in (model.model_kwargs or {})
+
+
+def test_anthropic_provider_openai_only_keys_are_deliberately_unmapped(
+    tmp_project, provider_keys_env
+):
+    """`ChatAnthropic` has no `presence_penalty`/`frequency_penalty`/`seed`
+    fields (see module docstring, "model_params") -- each must warn, and
+    `top_p`/`top_k`/`stop` (which it DOES support) must still land.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "smart"  # -> anthropic/claude-sonnet-5
+    data["model_params"] = {
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    with pytest.warns(UserWarning) as records:
+        model = LangGraphAdapter()._model_for(project, project.agents["writer"])
+
+    warned_keys = {
+        str(r.message).split("model_params key '")[1].split("'")[0] for r in records
+    }
+    assert warned_keys == {"presence_penalty", "frequency_penalty", "seed"}
+
+    assert isinstance(model, ChatAnthropic)
+    assert model.temperature == 0.3
+    assert model.top_p == 0.9
+    assert model.top_k == 40
+    assert model.stop_sequences == ["END"]
+    assert "presence_penalty" not in (model.model_kwargs or {})
+    assert "frequency_penalty" not in (model.model_kwargs or {})
+    assert "seed" not in (model.model_kwargs or {})
+
+
+def test_override_to_known_provider_uses_that_providers_full_map(
+    tmp_project, provider_keys_env
+):
+    """A `targets.langgraph.model` override whose provider prefix IS one of
+    this adapter's three known providers (here, `anthropic:...`) must use
+    THAT provider's own param map, not the conservative default (see module
+    docstring, "model_params" / "Per-target override") -- `top_k` must land.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["targets"]["langgraph"] = {"model": "anthropic:claude-opus-5"}
+    data["model_params"] = {"top_k": 40}
+    writer_cfg.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    import warnings as _warnings
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        model = LangGraphAdapter()._model_for(project, project.agents["writer"])
+
+    assert not caught  # top_k must NOT be warned-and-ignored for this override
+    assert isinstance(model, ChatAnthropic)
+    assert model.top_k == 40
+
+
+def test_override_to_unknown_provider_only_maps_the_conservative_default(
+    tmp_project, provider_keys_env
+):
+    """A `targets.langgraph.model` override to a provider prefix outside
+    this adapter's known three must fall back to `_DEFAULT_MODEL_PARAM_MAP`
+    (temperature/max_tokens only) -- `top_p` must warn even though the
+    underlying `init_chat_model` call might otherwise accept it, since this
+    adapter has never verified that for an arbitrary provider (see module
+    docstring, "model_params").
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    # "fake" isn't openai/anthropic/google_genai -- init_chat_model would
+    # reject it outright once it tries to actually resolve a client, but
+    # `_model_param_kwargs` is computed before that happens, so this proves
+    # the param-map fallback runs first.
+    data["targets"]["langgraph"] = {"model": "fake:some-model"}
+    data["model_params"] = {"temperature": 0.3, "top_p": 0.9}
     writer_cfg.write_text(yaml.safe_dump(data))
     project = commonadk.load(tmp_project)
 
     with pytest.warns(UserWarning, match="model_params key 'top_p'"):
+        with pytest.raises(Exception):
+            # The bogus provider itself is rejected by init_chat_model --
+            # only the *kwargs it was called with* are under test here, via
+            # the warning fired before that call.
+            LangGraphAdapter()._model_for(project, project.agents["writer"])
+
+
+def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env, provider_keys_env):
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    # "stop_sequences" is a plausible-looking but wrong key -- every
+    # provider map here uses the canonical key "stop" instead (see
+    # langgraph_adapter.py's module docstring, "model_params"); writer's
+    # provider (gemini/google_genai) supports every other candidate key, so
+    # this is the one still-genuinely-unsupported key left to exercise the
+    # warn-and-ignore path for it.
+    data["model_params"]["stop_sequences"] = ["END"]
+    writer_cfg.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    with pytest.warns(UserWarning, match="model_params key 'stop_sequences'"):
         graph = project.build("writer", target="langgraph")
 
     assert graph is not None  # build still succeeds

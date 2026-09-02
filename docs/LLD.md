@@ -16,7 +16,7 @@ src/commonadk/
 ├── loader.py            # common/ -> Project pipeline
 ├── validation.py         # cross-cutting checks over a loaded-but-unwrapped project
 ├── mermaid.py             # interactions.yaml -> mermaid rendering
-├── cli.py                  # argparse CLI: validate | render | run | --version
+├── cli.py                  # argparse CLI: validate | render | run | new | --version
 └── adapters/
     ├── __init__.py         # target -> adapter registry, lazy SDK imports
     ├── base.py               # BaseAdapter ABC + shared env-preflight/BFS
@@ -82,10 +82,14 @@ examples). `ToolSpec`, `AgentSpec`, and `Project` hold live Python objects
 | `targets` | `dict[str, dict[str, Any]]` | no | `{}` |
 | `runtime` | `Optional[str]` | no | `None` |
 
-`runtime` is reserved for future mixed-target spawning (`plan.md`,
-"Deferred / roadmap"). Unset by every shipped agent; if set,
-`validation._check_runtime` emits a warning, not an error — v1 still
-builds every agent under the single target passed to `project.build()`.
+`runtime` pins this agent to a specific SDK for mixed-target spawning
+(`mixed-target-design.md`). Unset by default -- `project.build(...,
+target=...)` never reads it at all, so it changes nothing about that call.
+`project.build_mixed(agent_name, default_target=...)` (`mixed.py`) is what
+honors it: an agent's own `runtime:` if set, else `default_target`
+(`Project.effective_runtime`). `validation._check_runtime` errors at load
+time if it names an unregistered target, or a registered one whose SDK
+isn't installed.
 
 ### `ToolParameter` / `ToolSpec`
 
@@ -271,13 +275,18 @@ the results. Checks, in call order:
 | `config.yaml entry` and `interactions.yaml entry` disagree | `_check_entry` | error |
 | `default_model` unresolvable (no `/`, not in `model_aliases`) | `_check_models` | error |
 | An agent's `model` (or fallback to `default_model`) unresolvable | `_check_models` | error |
-| `runtime:` set on any agent | `_check_runtime` | **warning** |
+| `runtime:` names a target not registered in `adapters._REGISTRY` | `_check_runtime` | error |
+| `runtime:` names a registered target whose SDK isn't installed | `_check_runtime` | error |
 
 `_check_tools` and `_check_folder_names` always run (guarded only by the
 dicts they're passed being non-empty in practice); `_check_edges` only runs
 if `graph is not None`; `_check_models` only runs if `project_config is not
 None`; `_check_entry` and `_check_runtime` always run and internally handle
-`None` project config / graph.
+`None` project config / graph. `_check_runtime` short-circuits (no
+`adapters` import at all) unless at least one agent's `runtime:` is set —
+see `mixed-target-design.md`, "What `runtime:` means now", for why that
+matters (the core stays SDK-free at load time for every project that
+doesn't opt into mixed-target spawning).
 
 `resolvable(raw)` (local to `_check_models`) is exactly
 `Project.resolve_model_string`'s success condition — kept in sync by hand,
@@ -953,7 +962,7 @@ error, not an adapter-specific one.
 
 ## `cli.py`
 
-Three subcommands plus `--version`, built with `argparse`
+Four subcommands plus `--version`, built with `argparse`
 (`subparsers.add_parser`, `dest="command", required=True`).
 
 | Command | Args | Behavior |
@@ -961,7 +970,32 @@ Three subcommands plus `--version`, built with `argparse`
 | `validate` | `common_dir` | Loads + validates; prints project name, entry agent, and per-agent model/tools/env status (env vars flagged `set`/`not set` against the current shell, `required`/`optional`) |
 | `render` | `common_dir` | Loads + validates, then `write_interaction_layer(common_dir, project.graph)`; prints the output path |
 | `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
+| `new` | `common_dir agent_name [--from AGENT --type {delegate,handoff}]` | Scaffolds `<agent_name>/{skill.md,tools.py,agent-config.yaml}` under `common_dir`; with `--from`, also appends an edge to `interactions.yaml` and regenerates `interaction-layer.md` (see below) |
 | `--version` | — | `argparse`'s built-in `action="version"`; prints `commonadk {version}` (via `importlib.metadata.version("commonadk")`, falling back to `"0.0.0+unknown"` if the package metadata isn't found) and exits `0` via `SystemExit` |
+
+**`new` in detail.** `_cmd_new` (1) refuses outright if `common_dir/
+agent_name` already exists (`ValueError`, before touching anything else on
+disk); (2) calls `_load_project` on the project AS IT STANDS first — this
+both fails loudly if the project is already broken (matching every other
+command) and, when `--from` is given, is how that agent name is checked
+against the real, loaded agent list (`ValueError` naming the known agents
+if `--from` doesn't resolve); (3) writes the three new files from
+module-level `str.format` templates (`_NEW_AGENT_SKILL_MD`,
+`_NEW_AGENT_TOOLS_PY`, `_NEW_AGENT_CONFIG_YAML`) — the generated
+`agent-config.yaml` deliberately omits `model:` so the new agent falls back
+to `config.yaml`'s `default_model` (already required to be resolvable by
+`validation._check_models`, so this alone can never be what breaks
+`commonadk validate`), and its `name:` always matches the folder name it
+was written into; (4) when `--from` is given, reads-and-rewrites
+`interactions.yaml` (`yaml.safe_load`/`yaml.safe_dump(sort_keys=False)`,
+preserving existing key order) to append one edge, `edge_type` defaulting to
+`"delegate"`, then reloads the project and calls
+`write_interaction_layer(common_dir, project.graph)` — the SAME renderer
+`commonadk render` uses, so `interaction-layer.md` is never hand-edited,
+here or anywhere else. `--type` without `--from` is rejected up front
+(`ValueError`, "--type requires --from") before any file is touched.
+Warnings from the final reload are surfaced via `_print_warnings`, matching
+`validate`/`render`/`run`.
 
 **Lazy SDK imports.** `validate` and `render` only touch `loader.py` and
 `mermaid.py`, neither of which imports any agent SDK at module scope, so
@@ -996,8 +1030,9 @@ letting Python's default warning machinery print to stderr on its own.
 `_print_warnings(caught)` then prints a `"Warnings:"` header followed by
 one `"  - {message}"` line per warning — called by `validate` and `render`
 after their main output, and by `run` immediately after loading (before
-attempting to build), so a `runtime:`-key warning or a missing-return-hint
-warning is visible in every command's output rather than silently lost.
+attempting to build), so a missing-return-hint warning (the one warning
+`validate`/`render`/`run` can still produce) is visible in every command's
+output rather than silently lost.
 
 **Exit-code behavior.** `main()` wraps the dispatched command in one
 `try/except` covering `ValidationError`, then `(OSError, ValueError,
@@ -1032,10 +1067,16 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | Edge names an unknown agent | `ValidationError` (accumulated) | `validation._check_edges` |
 | No resolvable entry agent, or `config.yaml`/`interactions.yaml` entries disagree | `ValidationError` (accumulated) | `validation._check_entry` |
 | `default_model` or an agent's `model` isn't a LiteLLM string or a known alias | `ValidationError` (accumulated) | `validation._check_models` |
-| `runtime:` set on an agent | `UserWarning` (non-fatal) | `validation._check_runtime` |
+| `runtime:` names a target not in `adapters.known_targets()` | `ValidationError` (accumulated) | `validation._check_runtime` |
+| `runtime:` names a known target whose SDK isn't installed | `ValidationError` (accumulated) | `validation._check_runtime` |
 | `resolve_model`/`resolve_model_string` called post-load with an alias not in `model_aliases` | `ValueError` | `models.Project.resolve_model_string` |
-| `resolve_model`/`check_env` called with an unknown agent name | `KeyError` | `models.Project._require_agent` |
+| `resolve_model`/`check_env`/`build_mixed` called with an unknown agent name | `KeyError` | `models.Project._require_agent` |
 | Required env var missing at build time (`_check_env`, transitively over reachable agents) | `OSError` | `adapters.base.BaseAdapter._check_env` |
+| Required env var missing anywhere across a mixed build (every runtime, before any island builds) | `OSError` | `mixed._check_env_all` |
+| A runtime unit has no single agent reaching every other member | `ValueError` | `mixed._pick_root` |
+| A cross-runtime edge is sourced at a non-root island member | `ValueError` | `mixed.build_mixed` |
+| A cross-runtime edge is sourced at an `autogen`/`langgraph` agent (unsupported in v1) | `ValueError` | `mixed._unsupported_source_error` |
+| A cross-runtime edge is sourced at a `crewai` hierarchical manager | `ValueError` | `mixed._attach_crewai` |
 | `ANTHROPIC_API_KEY` unset for `commonadk run --target claude` | `OSError` (raised by the CLI itself, before `project.build()`) | `cli._run_claude` |
 | Unknown `target=` string | `ValueError` | `adapters.get_adapter` |
 | Target's SDK not installed | `ImportError` (with `pip install "commonadk[...]"` hint) | `adapters.get_adapter` |
@@ -1051,6 +1092,9 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | Agent's resolved model isn't `gemini/openai/anthropic` and no `targets.langgraph.model` override (LangGraph build) | `ValueError` | `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
 | `model_params` key unsupported by the LangGraph adapter | `UserWarning` (non-fatal) | `adapters.langgraph_adapter.LangGraphAdapter._model_param_kwargs` |
 | Missing provider API key for LangGraph's `openai`/`google_genai` chat models (eager; `anthropic` is lazy and does *not* raise here) | the underlying SDK's own error (e.g. `openai.OpenAIError`, a pydantic `ValidationError`), unwrapped | `langchain.chat_models.init_chat_model`, called from `adapters.langgraph_adapter.LangGraphAdapter._model_for` |
+| `commonadk new`'s target agent folder already exists | `ValueError` (before any file is written) | `cli._cmd_new` |
+| `commonadk new --type` given without `--from` | `ValueError` (before any file is written) | `cli._cmd_new` |
+| `commonadk new --from` names an agent not in the (already-loaded) project | `ValueError` naming the known agents | `cli._cmd_new` |
 | Any of the above surfacing through the CLI | printed to `stderr`, exit code `1` | `cli.main`'s `try/except` |
 
 ## Testing layout
@@ -1099,7 +1143,8 @@ versions are shown below and are representative):
 |---|---|
 | `test_models.py` | `resolve_model` (alias, literal passthrough, default fallback, unknown-alias `ValueError`, unknown-agent `KeyError`); `check_env` (missing required, satisfied, no requirements) |
 | `test_loader.py` | Full `load()` happy path (config/entry/agents), instructions + tools populated and callable, `ToolSpec` schema metadata, edges present, frontmatter stripped from `skill.md`, missing folder raises `ValidationError` |
-| `test_validation.py` | Each check individually — unknown tool name, untyped param, missing docstring, edge to unknown agent, bad edge type, folder/name mismatch, unknown model alias, entry mismatch, missing `config.yaml`, unknown YAML key, `runtime:` warns when set / silent when unset — plus one test asserting multiple unrelated problems are *all* collected into one `ValidationError.errors` |
+| `test_validation.py` | Each check individually — unknown tool name, untyped param, missing docstring, edge to unknown agent, bad edge type, folder/name mismatch, unknown model alias, entry mismatch, missing `config.yaml`, unknown YAML key, `runtime:` loads silently when set to an installed target / errors on an unknown target name / errors with an install hint when the target's SDK is missing / no check at all when unset — plus one test asserting multiple unrelated problems are *all* collected into one `ValidationError.errors` |
+| `test_mixed.py` | Mixed-target spawning end to end — compatibility with plain `build()` when no `runtime:` is set, a real two-runtime project (`examples/mixed-crew`), island computation (same-runtime connected agents share one native sub-graph), each v1 source-capable target's bridge actually attaches and is callable, the unsupported-source/non-root-source/crewai-manager-source error paths, multi-root island rejection, and env preflight spanning every runtime in one `OSError` |
 | `test_mermaid.py` | Node/edge rendering, entry-node marking, delegate vs. handoff arrow styles, `write_interaction_layer` output shape, and a drift guard (`test_example_interaction_layer_matches_current_graph`) asserting the committed `interaction-layer.md` still matches a fresh render of `interactions.yaml` |
 | `test_adapter_google.py` | Gated by `pytest.importorskip("google.adk")`. Happy-path tree build, multi-parent rejection, cycle rejection, gemini-native vs. `LiteLlm`-wrapped model routing, per-target override precedence, env preflight (missing required blocks, optional doesn't, checks agents reachable via edges — not just direct sub_agents), unknown-target error, missing-SDK install-hint error |
 | `test_adapter_openai.py` | Gated by `pytest.importorskip("agents")`. Happy-path build, multi-parent graph building via a shared instance, cyclic graph building via post-hoc wiring, openai-native vs. `LitellmModel`-wrapped routing, per-target override, env preflight |
@@ -1109,3 +1154,4 @@ versions are shown below and are representative):
 | `test_adapter_langgraph.py` | Gated by `pytest.importorskip("langgraph")` and `pytest.importorskip("langchain")`. Happy-path multi-agent `StateGraph` build, bare-react-agent return for a leaf build, multi-parent and cyclic graphs via a flat node registry, duplicate edges to the same destination yielding exactly one handoff tool, gemini/openai/anthropic native routing, unsupported-provider error, per-target override, unsupported `model_params` key warned, env preflight |
 | `test_hypothesis.py` | `test_same_project_builds_on_every_installed_target`, parametrized over all six `target` strings — the v1 success criterion made executable: one `Project`, loaded once, built under whichever targets are actually installed (each case individually skipped via inline `pytest.importorskip`, not the whole file). Asserts each target's return value carries the build root's identity somewhere, under that SDK's own attribute shape (`.name` for google-adk/openai; `.system_prompt` for claude; `.manager_agent.role` for crewai; `._participant_names[0]` for autogen; `"coordinator" in .nodes` for langgraph) |
 | `test_cli.py` | In-process `cli.main(argv)` calls (no subprocess) asserting exit codes and captured stdout/stderr: `validate` (success summary incl. env set/not-set, broken project exits 1, missing folder exits 1), `render` (writes file, broken project exits 1), `run` (missing `requires.env` var, missing `ANTHROPIC_API_KEY` for `--target claude` naming that var in stderr, unknown target, unknown agent, broken project exits 1 before touching any SDK), `--version` |
+| `test_cli_new.py` | `commonadk new`: happy path (scaffolded files' shape, output passes `commonadk validate`, `interactions.yaml`/`interaction-layer.md` untouched with no `--from`), refuse-to-overwrite (an existing shipped agent and a just-scaffolded one, files left untouched either way), the `--from`/`--type` edge variant (edge appended, `interaction-layer.md` regenerated via the real renderer, default edge type is `delegate`, output passes `commonadk validate`), `--type` without `--from` rejected, unknown `--from` agent rejected (naming the known agents), broken project exits 1 before scaffolding anything, missing project folder exits 1 |

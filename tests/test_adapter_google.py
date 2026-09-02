@@ -181,6 +181,59 @@ def test_per_target_override_wins(example_common_dir, tavily_env):
 
 
 # ---------------------------------------------------------------------------
+# model_params
+# ---------------------------------------------------------------------------
+
+
+def test_full_model_params_land_on_generate_content_config(tmp_project, tavily_env):
+    """Every mapped model_params key (see google_adk.py's module docstring
+    and `_MODEL_PARAM_MAP`) must land on the built agent's
+    `generate_content_config`, under the field name `GenerateContentConfig`
+    actually declares -- `max_tokens` -> `max_output_tokens`, `stop` ->
+    `stop_sequences`, and everything else passed straight through.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stop": ["END"],
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+        "seed": 42,
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    agent = project.build("writer", target="google-adk")
+
+    cfg = agent.generate_content_config
+    assert cfg.temperature == 0.3
+    assert cfg.max_output_tokens == 2048
+    assert cfg.top_p == 0.9
+    assert cfg.top_k == 40
+    assert cfg.stop_sequences == ["END"]
+    assert cfg.presence_penalty == 0.1
+    assert cfg.frequency_penalty == 0.2
+    assert cfg.seed == 42
+
+
+def test_unsupported_model_params_key_is_warned_and_ignored(tmp_project, tavily_env):
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"]["not_a_real_param"] = 1
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match="model_params key 'not_a_real_param'"):
+        agent = project.build("writer", target="google-adk")
+
+    assert agent is not None  # build still succeeds
+
+
+# ---------------------------------------------------------------------------
 # env preflight
 # ---------------------------------------------------------------------------
 

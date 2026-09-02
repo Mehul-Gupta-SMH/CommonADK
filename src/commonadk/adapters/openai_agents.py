@@ -47,10 +47,19 @@ if TYPE_CHECKING:
 
 from .base import BaseAdapter
 
-# agent-config.yaml `model_params` key -> agents.ModelSettings field
+# agent-config.yaml `model_params` key -> agents.ModelSettings field.
+# `dataclasses.fields(ModelSettings)` (openai-agents 0.21.1) was introspected
+# directly: `top_p`, `frequency_penalty`, and `presence_penalty` are real
+# fields and map straight across, exactly like `temperature`/`max_tokens`.
+# `top_k`, `stop`, and `seed` are NOT fields on this dataclass at all (no
+# `stop_sequences` either) -- verified absent, not assumed -- so those three
+# keys stay unmapped and fall through to the warn-and-ignore path below.
 _MODEL_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_tokens",
+    "top_p": "top_p",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
 }
 
 

@@ -1,0 +1,6 @@
+name: mixed-crew
+entry: coordinator
+targets: [google-adk, crewai]
+default_model: fast
+model_aliases:
+  fast: gemini/gemini-2.5-flash

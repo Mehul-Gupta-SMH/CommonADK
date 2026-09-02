@@ -106,13 +106,16 @@ with no override fails loudly by design (tested); adding
 is what makes the example buildable here too.
 
 model_params: the installed SDK exposes no per-request sampling controls
-analogous to `temperature`/`max_tokens` anywhere in `claude_agent_sdk.types`
-(`ClaudeAgentOptions` and `AgentDefinition` were grepped for `temperature`,
-`top_p`, `top_k`, and `max_tokens` -- none exist; the closest fields,
-`thinking`/`effort`/`max_thinking_tokens`/`max_turns`, are reasoning-effort
-and turn-budget controls, not sampling parameters). So every `model_params`
-key is unsupported here and this adapter warns-and-ignores all of them, per
-the same policy the Google ADK and OpenAI Agents adapters apply to whichever
+analogous to `temperature`/`max_tokens` anywhere in `claude_agent_sdk.types`.
+Re-verified directly against installed claude-agent-sdk 0.2.144 via
+`dataclasses.fields(ClaudeAgentOptions)` and `dataclasses.fields(
+AgentDefinition)` for this project's full candidate list (`temperature`,
+`max_tokens`, `top_p`, `top_k`, `stop`/`stop_sequences`, `presence_penalty`,
+`frequency_penalty`, `seed`) -- none exist on either dataclass; the closest
+fields, `thinking`/`effort`/`max_thinking_tokens`/`max_turns`, are
+reasoning-effort and turn-budget controls, not sampling parameters. So every
+`model_params` key is unsupported here and this adapter warns-and-ignores
+all of them, per the same policy the other five adapters apply to whichever
 keys *they* don't recognize.
 """
 
@@ -134,7 +137,9 @@ if TYPE_CHECKING:
 from .base import BaseAdapter
 
 # agent-config.yaml `model_params` keys -> claude_agent_sdk field: none exist
-# (see module docstring, "model_params") -- every key is warned-and-ignored.
+# for temperature, max_tokens, top_p, top_k, stop, presence_penalty,
+# frequency_penalty, or seed (see module docstring, "model_params") -- every
+# key is warned-and-ignored.
 _MODEL_PARAM_MAP: dict[str, str] = {}
 
 # models.py ToolParameter.type strings -> JSON Schema "type" values. Anything

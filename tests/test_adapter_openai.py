@@ -182,6 +182,58 @@ def test_per_target_override_wins(tmp_project, tavily_env):
 
 
 # ---------------------------------------------------------------------------
+# model_params
+# ---------------------------------------------------------------------------
+
+
+def test_mapped_model_params_land_on_model_settings(tmp_project, tavily_env):
+    """Every mapped model_params key (see openai_agents.py's module
+    docstring and `_MODEL_PARAM_MAP`) must land on the built agent's
+    `model_settings`, under `agents.ModelSettings`'s own field names.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"] = {
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "top_p": 0.9,
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.2,
+    }
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    agent = project.build("writer", target="openai")
+
+    settings = agent.model_settings
+    assert settings.temperature == 0.3
+    assert settings.max_tokens == 2048
+    assert settings.top_p == 0.9
+    assert settings.presence_penalty == 0.1
+    assert settings.frequency_penalty == 0.2
+
+
+@pytest.mark.parametrize("unsupported_key", ["top_k", "stop", "seed"])
+def test_unsupported_model_params_keys_are_warned_and_ignored(
+    tmp_project, tavily_env, unsupported_key
+):
+    """`agents.ModelSettings` has no `top_k`, `stop`, or `seed` field at all
+    (verified via `dataclasses.fields` -- see module docstring) -- each must
+    warn, not raise, and the build must still succeed.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"][unsupported_key] = "irrelevant"
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match=f"model_params key '{unsupported_key}'"):
+        agent = project.build("writer", target="openai")
+
+    assert agent is not None  # build still succeeds
+
+
+# ---------------------------------------------------------------------------
 # env preflight
 # ---------------------------------------------------------------------------
 

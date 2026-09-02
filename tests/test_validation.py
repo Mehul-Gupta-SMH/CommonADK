@@ -149,21 +149,73 @@ def test_unknown_yaml_key_errors(tmp_project):
     assert any("modle" in e for e in errors)
 
 
-def test_runtime_key_warns_when_set(tmp_project):
+def test_runtime_key_with_installed_sdk_loads_silently(tmp_project, recwarn):
+    # A `runtime:` naming a real, installed target is honored, not warned
+    # about -- see docs/mixed-target-design.md, "What `runtime:` means now".
+    pytest.importorskip("google.adk")
+
     cfg_path = tmp_project / "researcher" / "agent-config.yaml"
     data = _load_yaml(cfg_path)
     data["runtime"] = "google-adk"
     _dump_yaml(cfg_path, data)
 
-    with pytest.warns(UserWarning, match="runtime"):
-        project = commonadk.load(tmp_project)
+    project = commonadk.load(tmp_project)
 
     assert project.agents["researcher"].config.runtime == "google-adk"
+    assert not any("runtime" in str(w.message) for w in recwarn.list)
 
 
-def test_no_runtime_warning_when_unset(tmp_project, recwarn):
+def test_no_runtime_check_when_unset(tmp_project, recwarn):
+    # No agent sets `runtime:` -- the compatibility baseline this feature
+    # must not disturb: no warning, no error, no adapter/SDK import at all.
     commonadk.load(tmp_project)
     assert not any("runtime" in str(w.message) for w in recwarn.list)
+
+
+def test_unknown_runtime_name_errors(tmp_project):
+    cfg_path = tmp_project / "researcher" / "agent-config.yaml"
+    data = _load_yaml(cfg_path)
+    data["runtime"] = "not-a-real-sdk"
+    _dump_yaml(cfg_path, data)
+
+    with pytest.raises(ValidationError) as exc_info:
+        commonadk.load(tmp_project)
+
+    errors = exc_info.value.errors
+    assert any(
+        "not-a-real-sdk" in e and "google-adk" in e for e in errors
+    )  # known targets listed
+
+
+def test_runtime_missing_sdk_gives_install_hint(tmp_project, monkeypatch):
+    # Simulate google-adk not being installed by making the adapter
+    # registry's import of it fail -- same technique as
+    # test_adapter_google.py's test_get_adapter_missing_sdk_gives_install_hint.
+    import importlib
+
+    import commonadk.adapters as adapters_pkg
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name, *args, **kwargs):
+        if name == "commonadk.adapters.google_adk":
+            raise ImportError("No module named 'google'")
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(adapters_pkg, "import_module", fake_import_module)
+
+    cfg_path = tmp_project / "researcher" / "agent-config.yaml"
+    data = _load_yaml(cfg_path)
+    data["runtime"] = "google-adk"
+    _dump_yaml(cfg_path, data)
+
+    with pytest.raises(ValidationError) as exc_info:
+        commonadk.load(tmp_project)
+
+    errors = exc_info.value.errors
+    assert any(
+        "researcher" in e and "google-adk" in e and "pip install" in e for e in errors
+    )
 
 
 def test_all_errors_collected_in_one_raise(tmp_project):

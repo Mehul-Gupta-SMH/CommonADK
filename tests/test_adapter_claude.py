@@ -292,6 +292,32 @@ def test_model_params_are_warned_and_ignored(example_common_dir, tavily_env):
     assert options is not None  # build still succeeds
 
 
+@pytest.mark.parametrize(
+    "unsupported_key",
+    ["temperature", "max_tokens", "top_p", "top_k", "stop", "presence_penalty",
+     "frequency_penalty", "seed"],
+)
+def test_full_candidate_model_params_set_is_warned_and_ignored(
+    tmp_project, tavily_env, unsupported_key
+):
+    """Re-verified against installed claude-agent-sdk 0.2.144 (see module
+    docstring): this project's whole `model_params` candidate list --
+    including every key another adapter maps -- has no matching field on
+    either `ClaudeAgentOptions` or `AgentDefinition`, so each one must warn
+    individually, not just `temperature`/`max_tokens`.
+    """
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model_params"][unsupported_key] = "irrelevant"
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.warns(UserWarning, match=f"model_params key '{unsupported_key}'"):
+        options = project.build("writer", target="claude")
+
+    assert options is not None  # build still succeeds
+
+
 # ---------------------------------------------------------------------------
 # env preflight
 # ---------------------------------------------------------------------------

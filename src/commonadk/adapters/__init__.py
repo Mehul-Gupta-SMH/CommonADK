@@ -24,6 +24,17 @@ _REGISTRY: dict[str, tuple[str, str, str]] = {
 }
 
 
+def known_targets() -> list[str]:
+    """Sorted list of registered target names -- no SDK import required.
+
+    Used by `validation.py`'s `runtime:` check to validate a name against
+    the registry without importing any adapter module (and therefore
+    without importing any agent SDK) -- see mixed-target-design.md, "What
+    `runtime:` means now".
+    """
+    return sorted(_REGISTRY)
+
+
 def get_adapter(target: str) -> BaseAdapter:
     """Look up and instantiate the adapter for `target`.
 
@@ -51,4 +62,4 @@ def get_adapter(target: str) -> BaseAdapter:
     return adapter_cls()
 
 
-__all__ = ["BaseAdapter", "get_adapter"]
+__all__ = ["BaseAdapter", "get_adapter", "known_targets"]
