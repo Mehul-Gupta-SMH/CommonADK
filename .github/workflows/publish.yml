@@ -77,25 +77,39 @@ jobs:
       url: https://pypi.org/project/commonadk/
     permissions:
       id-token: write
-    env:
-      # Trusted publishing is the intended path and needs no secret. If a
-      # PYPI_API_TOKEN secret exists, it wins -- an escape hatch for when
-      # the PyPI-side trusted-publisher record cannot be matched.
-      HAS_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
+      # Trusted publishing is the intended path and needs no secret. A
+      # PYPI_API_TOKEN secret, when present, wins -- an escape hatch for when
+      # the PyPI-side trusted-publisher record cannot be matched. Detection
+      # happens in a step (not job-level env) so the secret is definitely in
+      # scope, and so the log says which path was chosen without leaking the
+      # value.
+      - name: Detect PyPI API token
+        id: detect
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "PYPI_API_TOKEN is set (${#TOKEN} chars) -- using token auth."
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "PYPI_API_TOKEN is empty or not visible to this job -- using trusted publishing."
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to PyPI (API token)
-        if: env.HAS_TOKEN == 'true'
+        if: steps.detect.outputs.has_token == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Publish to PyPI (trusted publishing)
-        if: env.HAS_TOKEN != 'true'
+        if: steps.detect.outputs.has_token != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
 
   tag:
