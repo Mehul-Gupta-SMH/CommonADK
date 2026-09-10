@@ -138,26 +138,66 @@ ADK session — no cross-conversation bleed.
 | `RunItemStreamEvent(name="tool_called")` wrapping a `ToolCallItem` (`agents/items.py:390`, `.tool_name`/`.call_id` properties) | Opens a pending `ToolCall`, keyed by `.call_id` (falling back to `id(item)` if absent — verified some raw tool-call shapes are plain `dict`s without a `call_id`). `arguments` parsed from `raw_item.arguments` (a JSON string on `ResponseFunctionToolCall`) via `json.loads`, falling back to `{"_raw": <string>}` if it isn't valid JSON (never silently dropped). |
 | `RunItemStreamEvent(name="tool_output")` wrapping a `ToolCallOutputItem` (`agents/items.py:438`, `.output`) | Closes the pending `ToolCall` matched by call id; `duration_ms` is this runner's own wall-clock delta between the two stream events (same caveat as ADK: the SDK doesn't timestamp tool execution itself). |
 | `RunItemStreamEvent(name="handoff_occured")` wrapping a `HandoffOutputItem` (`agents/items.py:317`, `.source_agent`/`.target_agent`) | `Transfer(transfer_kind="openai-agents:handoff")` — note the SDK's own field/event name is misspelled (`"handoff_occured"`, `agents/stream_events.py:34`, with a code comment explaining it's kept for backward compatibility) — the raw string, not a fixed typo, is what this runner switches on. |
-| `RunResultStreaming.raw_responses: list[ModelResponse]` (`agents/items.py:713`), each with `.usage: Usage` (`agents/usage.py:196`) | `LLMCall`, one per `ModelResponse`, emitted **after** the stream fully drains (not incrementally — see "Not available" below for why). `Usage.requests` (`agents/usage.py:200`) is the "did a real API call happen and report usage" signal used in place of ADK's `Optional` field, since `Usage`'s own token fields default to plain `int = 0`, not `None` — see "OpenAI Agents' `0`-not-`None` wrinkle" below. |
+| `RunResultStreaming.raw_responses: list[ModelResponse]` (`agents/items.py:713`), each with `.usage: Usage` (`agents/usage.py:196`) | `LLMCall`, one per `ModelResponse`, emitted **after** the stream fully drains (not incrementally — see "Not available" below for why). Whether usage was actually reported is decided from `Usage`'s own token fields (`input_tokens`/`output_tokens`/`total_tokens`, all nonzero-checked) since `Usage`'s token fields default to plain `int = 0`, not `None`, and — corrected after a live run — `Usage.requests` alone is **not** a safe "did it report usage" signal; see "OpenAI Agents' `0`-not-`None` wrinkle" below. |
 | **Not available (v1, documented gap)**: which agent produced which `ModelResponse`. | `ModelResponse` (`agents/items.py:713`) has no agent-identifying field — confirmed by reading its full field list (`output`, `usage`, `response_id`, `request_id`, `raw_usage`). When a run involves exactly one agent (no `handoff_occured` observed), every `LLMCall.agent_name` is that agent's name — precise. When a run spans a handoff, this runner sets `LLMCall.agent_name = None` for every call in that run rather than guessing which of the participating agents made which call — the per-agent rollup in `Trace.rollup()` simply excludes `agent_name=None` calls from any agent's bucket while still counting them in the run-wide total. A future version could attempt finer attribution by counting `RunItemStreamEvent`s between agent changes, but that requires assuming a 1:1 item-count-to-call-count relationship this investigation did not verify against the installed SDK and is not asserted here. |
 | **Not available**: per-call duration. | `ModelResponse` carries no timing field either — `LLMCall.duration_ms` is always `None` here too. |
 | `raw_response_event` (`RawResponsesStreamEvent`, wrapping the OpenAI Responses API's own low-level delta events) | **Not mapped in v1.** These are the individual token-level streaming deltas underneath a single `ModelResponse` (content deltas, response-lifecycle markers). Mapping them would let `--stream` show token-by-token output, but there's no normalized event in this model for "partial text delta" (`plan.md`/this doc's "Out of scope" explicitly defers streaming-token granularity) — a runner that tried would need a new event type, not a reinterpretation of `LLMCall`/`ToolCall`. This runner explicitly skips (`continue`s past) every `raw_response_event`. |
 | `RunItemStreamEvent(name="message_output_created"|"reasoning_item_created"|"mcp_*"|...)` | **Not mapped.** These carry the model's own text/reasoning/MCP-protocol bookkeeping, already reflected in `RunFinished.final_text` (from `result.final_output`) and not distinct "steps" in the normalized model's vocabulary. |
 
-**OpenAI Agents' `0`-not-`None` wrinkle**: unlike Google ADK's
+**OpenAI Agents' `0`-not-`None` wrinkle (corrected after issue #8's first
+live run)**: unlike Google ADK's
 `Optional[GenerateContentResponseUsageMetadata]`, `agents.usage.Usage`'s
 `input_tokens`/`output_tokens`/`total_tokens` fields (`agents/usage.py:196`)
 are plain `int`, defaulting to `0` — there is no SDK-native way to ask "was
-usage reported for this call" from the token fields alone. `Usage.requests`
-(also `int`, default `0`, incremented by the SDK when a request completes
-and contributed usage — verified via `agents/usage.py`'s own `add()`/`add_from_response`
-accumulation logic) is the field this runner reads instead: `requests > 0`
-is treated as "usage reported," and only then are the int fields copied
-onto `LLMCall` (still verbatim ints, never re-defaulted to `None` after
-that check passes). This is the one place in this codebase where "is usage
-present" is inferred from a sibling field rather than an `Optional` type
-directly — documented here because it's a real, source-verified asymmetry
-between the two SDKs' own usage-reporting conventions, not an oversight.
+usage reported for this call" from the token fields alone.
+
+The first live run (model `claude-haiku-4-5`, routed through this target's
+LiteLLM bridge) exposed a bug in this runner's original heuristic, which
+read `Usage.requests > 0` as "usage reported." That does **not** hold:
+verified directly against the installed `agents` 0.21.1 package,
+`agents/run_internal/run_loop.py` (around the `ModelResponse` construction
+that feeds `RunResultStreaming.raw_responses`) builds
+`Usage(requests=_requests_for_response_without_usage(terminal_response))`
+whenever `terminal_response.usage` is `None` — i.e. whenever the *provider*
+never sent back a usage payload at all. `_requests_for_response_without_usage`
+(`agents/usage.py`) returns `1` here because
+`agents/models/chatcmpl_stream_handler.py`'s `_mark_request_completed_without_usage`
+marked the response as "the request completed, so it counts, even though
+the provider reported no usage" (`agents/extensions/models/litellm_model.py`
+does the same on its non-streaming path, with an explicit
+`logger.warning("No usage information returned from Litellm")` next to it).
+The result is a `Usage` object with `requests=1` and every token field at
+its `int` default of `0` — structurally the *same shape* `requests > 0`
+was supposed to treat as "reported." Reconstructing that exact object
+against the installed SDK (`Usage(requests=1)`) and running it through the
+old code confirms the old heuristic returns `reported=True` for it, which
+is precisely how the live run produced `0 tokens`, `$0.000000` for a turn
+that had genuinely succeeded.
+
+The fix: `reported` is now decided from the token fields themselves —
+`bool(usage.input_tokens or usage.output_tokens or usage.total_tokens)` —
+never from `Usage.requests`. Only when at least one token field is nonzero
+are the int fields copied onto `LLMCall` (still verbatim ints, never
+re-defaulted to `None` after that check passes); otherwise every one of
+`LLMCall`'s token/cost fields is `None`.
+
+**Is a genuine all-zero usage distinguishable from an unreported one?**
+No — not from the public `Usage` object this runner has access to. A
+provider-side `_mark_request_completed_without_usage` response and a
+(hypothetical) real response that legitimately used exactly zero input and
+output tokens produce an *identical* `Usage(requests=1, input_tokens=0,
+output_tokens=0, total_tokens=0, ...)` — there is no additional field on
+`Usage`, `ModelResponse`, or anywhere in `RunResultStreaming.raw_responses`
+that carries the private "completed without usage" marker
+(`_agents_sdk_request_completed_without_usage`, an attribute the SDK
+attaches to its internal `Response` object, not to the `Usage`/
+`ModelResponse` this runner ever sees). Since a real completed LLM call
+reporting literally zero prompt tokens is not a case any provider this
+project targets actually produces, this runner takes the conservative
+reading per this project's own founding rule: an all-zero `Usage` is
+treated as **unreported** (`None`), not as a confident zero. `Usage.requests`
+is no longer read at all for this decision — it was the source of the bug,
+not a fallback for it.
 
 **Session/multi-turn**: `RunSession.native["openai"]` holds one
 `agents.SQLiteSession` (`agents/memory/sqlite_session.py:42`, default

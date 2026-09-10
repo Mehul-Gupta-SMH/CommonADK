@@ -652,8 +652,12 @@ def test_openai_agents_runner_usage_not_reported_becomes_none_not_zero(
     tmp_project, tavily_env, monkeypatch
 ):
     """`Usage`'s int fields default to 0, not None (see runner-design.md,
-    "the 0-not-None wrinkle") -- `Usage.requests == 0` is the signal this
-    runner uses to still report None on LLMCall rather than a fabricated 0."""
+    "the 0-not-None wrinkle") -- an all-zero `input_tokens`/`output_tokens`/
+    `total_tokens` triple (here also `requests=0`) is the signal this
+    runner uses to still report None on LLMCall rather than a fabricated 0.
+    See test_openai_agents_runner_litellm_unreported_usage_becomes_none_not_zero
+    for the sibling case where `requests` alone is nonzero but usage was
+    still never reported."""
     pytest.importorskip("agents")
 
     from agents import Runner as OaRunner
@@ -683,6 +687,72 @@ def test_openai_agents_runner_usage_not_reported_becomes_none_not_zero(
     finished = trace.events[-1]
     assert isinstance(finished, RunFinished)
     assert finished.usage_complete is False
+
+
+def test_openai_agents_runner_litellm_unreported_usage_becomes_none_not_zero(
+    tmp_project, tavily_env, monkeypatch
+):
+    """Regression for the live-run bug (claude-haiku-4-5 via the LiteLLM
+    bridge): `Usage.requests` alone is NOT a reliable "usage was reported"
+    signal. Verified directly against the installed SDK
+    (`agents/run_internal/run_loop.py`, `agents/extensions/models/
+    litellm_model.py`): when a provider's streamed/non-streamed response
+    carries no usage payload, the SDK still marks the *request* as having
+    completed (`_mark_request_completed_without_usage` /
+    `_requests_for_response_without_usage`) and folds that into
+    `Usage(requests=1)` -- `requests=1` with every token field at its `int`
+    default of `0`. That is structurally identical to `Usage(requests=1,
+    input_tokens=0, output_tokens=0, total_tokens=0)` reconstructed here,
+    which is exactly the shape a real LiteLLM-bridged run produced (see
+    docs/runner-design.md). This is the case the old `requests > 0`
+    heuristic silently reported as "0 tokens, $0.000000" instead of
+    "unknown"."""
+    pytest.importorskip("agents")
+
+    from agents import Runner as OaRunner
+    from agents.items import ModelResponse
+    from agents.usage import Usage as OaUsage
+
+    from commonadk.runners.openai_agents import OpenAIAgentsRunner
+
+    # requests=1 (the SDK counted the completed request) but every token
+    # field left at its int default -- the provider reported no usage at
+    # all, per the installed SDK's own "completed without usage" path.
+    unreported_usage = OaUsage(requests=1)
+    raw_responses = [ModelResponse(output=[], usage=unreported_usage, response_id="r1")]
+    fake_result = _fake_openai_stream_result([], raw_responses, "That text has 9 words.")
+
+    monkeypatch.setattr(
+        OaRunner, "run_streamed", classmethod(lambda cls, starting_agent, input, **kw: fake_result)
+    )
+
+    project = load(str(tmp_project))
+    runner = OpenAIAgentsRunner()
+    trace = runner.run_sync(project, "coordinator", "hi")
+
+    llm_call = next(e for e in trace.events if isinstance(e, LLMCall))
+    # The load-bearing assertion: NOT 0, NOT $0.000000 -- honestly unknown.
+    assert llm_call.prompt_tokens is None
+    assert llm_call.completion_tokens is None
+    assert llm_call.total_tokens is None
+    assert llm_call.cost_usd is None
+
+    finished = trace.events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.usage_complete is False
+    assert finished.total_tokens is None
+    assert finished.total_cost_usd is None
+
+    # Trace.rollup() must mark the run's usage/cost incomplete rather than
+    # summing a phantom zero into a total that looks whole -- with a note
+    # explaining exactly what's missing.
+    llm_totals = trace.rollup()["llm_calls"]
+    assert llm_totals["usage_complete"] is False
+    assert llm_totals["reported_count"] == 0
+    assert llm_totals["total_tokens"] is None
+    assert llm_totals["cost_usd"] is None
+    assert llm_totals["note"] is not None
+    assert "1 of 1" in llm_totals["note"]
 
 
 def test_openai_agents_runner_session_reuses_same_sqlite_session_across_turns(

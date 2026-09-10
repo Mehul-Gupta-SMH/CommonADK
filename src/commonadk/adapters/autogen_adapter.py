@@ -211,6 +211,51 @@ this codebase. Any key absent from whichever map applies is
 warned-and-ignored, per the same policy every other adapter applies to keys
 it doesn't map.
 
+VERIFIED UPSTREAM INCOMPATIBILITY: `anthropic>=1` breaks the `anthropic/...`
+provider branch entirely, and commonadk cannot prevent it by omitting
+`model_params` -- confirmed live (M8's first live run, all six targets,
+model `anthropic/claude-haiku-4-5`): the AutoGen target was the only one of
+six that did not execute, failing in 0.22s with `TypeError:
+AsyncMessages.create() got an unexpected keyword argument 'temperature'`,
+never reaching the API. Root cause, read directly from the installed
+source, not inferred: `autogen_ext.models.anthropic._anthropic_client`
+(still true as of autogen-ext 0.7.5, both `create` and `create_stream`)
+builds every request as `request_args = {..., "temperature":
+create_args.get("temperature", 1.0)}` -- this key is ALWAYS present, with a
+default of `1.0`, regardless of whether the caller (this adapter, via
+`model_params`) ever set `temperature`; there is no branch that omits it.
+That was harmless against `anthropic<1`: this dev box's installed
+`anthropic` 0.122.0 still accepts `temperature` as a real kwarg on
+`AsyncMessages.create` (checked directly via `inspect.signature`), so every
+offline test in this codebase passes here. But `anthropic>=1` (confirmed at
+both the 1.0.0 boundary and 1.5.0 -- the version CI's `autogen` extra leg
+actually resolves, since it is the only CI leg installing this extra with
+no other extra around to pull in an older transitive `anthropic` pin)
+removed `temperature` from `AsyncMessages.create`'s signature entirely
+(confirmed via `inspect.signature` against a real `anthropic==1.5.0`
+install), so that hard-coded kwarg becomes a raw `TypeError` raised from
+inside `anthropic`'s own generated method wrapper, at Python
+argument-binding time -- before any HTTP request, reproduced directly in a
+clean venv with no network call and no real API key needed. This project's
+`autogen` extra now pins `anthropic<1` for exactly this reason (see
+pyproject.toml's `autogen` extra comment for what that pin does and does
+not conflict with). That pin AVOIDS the bug for anyone who installs via
+this project's own extras; it does not fix it -- `autogen_ext`'s client
+still hard-codes the kwarg, so anyone who independently upgrades
+`anthropic` past `1.0` in the same environment (or installs this adapter's
+dependencies by hand, ignoring the extras) hits the same `TypeError` again.
+So `_client_for`'s `anthropic/...` branch also runs a build-time guard,
+`_check_anthropic_temperature_compat()`: it reads the installed
+`anthropic` package's version via `importlib.metadata` (no import of
+`anthropic` itself needed) and raises a clear commonadk `RuntimeError` --
+naming the installed `anthropic` and `autogen-ext` versions, the exact
+mechanism above, and the fix (`pip install 'anthropic<1'`) -- rather than
+letting a raw SDK `TypeError` surface at `run()` time. This is the
+project's standing policy (a target that cannot do something errors loudly
+at build time, not obscurely at run time) applied to a case this adapter
+cannot route around: unlike the model-info workarounds above, there is no
+commonadk-side kwarg to add or omit that changes what `autogen_ext` sends.
+
 Offline construction -- a real difference from every other adapter here,
 investigated not assumed: `OpenAIChatCompletionClient`/
 `AnthropicChatCompletionClient.__init__` EAGERLY construct the underlying
@@ -235,6 +280,7 @@ somewhere.
 
 from __future__ import annotations
 
+import importlib.metadata as importlib_metadata
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -306,6 +352,69 @@ _GEMINI_MODEL_INFO: ModelInfo = {
 }
 
 
+def _installed_version(package: str) -> str | None:
+    """`importlib.metadata.version`, `None` if `package` isn't installed --
+    never imports `package` itself. Split out so tests can monkeypatch a
+    single, narrow seam instead of the whole `importlib.metadata` module
+    (see module docstring, "VERIFIED UPSTREAM INCOMPATIBILITY").
+    """
+    try:
+        return importlib_metadata.version(package)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
+def _check_anthropic_temperature_compat() -> None:
+    """Build-time guard for the verified `anthropic>=1` incompatibility
+    documented in the module docstring ("VERIFIED UPSTREAM
+    INCOMPATIBILITY") -- called once, from `_client_for`'s `anthropic/...`
+    branch, before constructing `AnthropicChatCompletionClient`. Raises a
+    clear commonadk error instead of letting a raw `TypeError` surface out
+    of `anthropic`'s own generated method wrapper the first time the built
+    agent/team is actually run.
+    """
+    installed = _installed_version("anthropic")
+    if installed is None:
+        # No `anthropic` package at all -- `autogen_ext.models.anthropic`
+        # itself fails to import with its own clear error first; not this
+        # guard's job to duplicate that.
+        return
+
+    major = installed.split(".", 1)[0]
+    try:
+        major_num = int(major)
+    except ValueError:
+        # An unparseable leading version segment (unexpected for a real
+        # PyPI release) -- don't block on a guess neither confirmed safe
+        # nor confirmed broken.
+        return
+    if major_num < 1:
+        return  # anthropic<1 -- the compatible range this adapter verified.
+
+    autogen_ext_version = _installed_version("autogen-ext") or "<not installed>"
+    raise RuntimeError(
+        f"commonadk: the AutoGen target ('autogen') cannot use the "
+        f"anthropic/... provider with anthropic=={installed} installed. "
+        f"autogen-ext=={autogen_ext_version}'s AnthropicChatCompletionClient "
+        f"unconditionally sends a `temperature` kwarg to "
+        f"anthropic.AsyncMessages.create() on every request -- "
+        f"'\"temperature\": create_args.get(\"temperature\", 1.0)' in "
+        f"autogen_ext/models/anthropic/_anthropic_client.py, present even "
+        f"when no model_params.temperature was ever set -- but anthropic>=1 "
+        f"removed the `temperature` parameter from `messages.create()` "
+        f"entirely, so every call would fail with `TypeError: "
+        f"AsyncMessages.create() got an unexpected keyword argument "
+        f"'temperature'` (verified directly, both at construction-adjacent "
+        f"inspection and a live reproduction -- see autogen_adapter.py's "
+        f"module docstring). This is an upstream autogen-ext bug, not "
+        f"something commonadk's model_params mapping can route around. "
+        f"Fix: `pip install 'anthropic<1'` in this environment (this "
+        f"project's own `autogen` extra already pins this; something else "
+        f"upgraded it past that pin here), or track "
+        f"https://github.com/microsoft/autogen for an upstream fix."
+    )
+
+
 class AutoGenAdapter(BaseAdapter):
     target = "autogen"
 
@@ -358,6 +467,7 @@ class AutoGenAdapter(BaseAdapter):
             kwargs = self._model_param_kwargs(spec, _OPENAI_MODEL_PARAM_MAP)
             return OpenAIChatCompletionClient(model=rest, **kwargs)
         if sep and provider == "anthropic":
+            _check_anthropic_temperature_compat()
             kwargs = self._model_param_kwargs(spec, _ANTHROPIC_MODEL_PARAM_MAP)
             return AnthropicChatCompletionClient(
                 model=rest, model_info=_ANTHROPIC_MODEL_INFO, **kwargs

@@ -277,16 +277,58 @@ evaluated false there), installs all six SDK extras, runs the script,
 writes the summary table to the job's `$GITHUB_STEP_SUMMARY`, and uploads
 the JSON report plus every per-target trace file as a build artifact.
 
-**No live run has been performed as of this writing.** Everything in this
-section — the project, the script, the workflow, and every test in
-`tests/test_live_smoke.py` — has been verified **offline only**: `commonadk
-validate`, `project.build(...)` for all six targets, `--list`, `--dry-run`,
-and the report/error-handling logic under monkeypatched stand-ins for each
-target's real execution path (never a real SDK call). No `ANTHROPIC_API_KEY`
-exists in the environment this was built in, and the task that built this
-explicitly forbade fabricating live output. Once a maintainer actually
-triggers the workflow with a real `CLAUDE_API_KEY` secret configured, its
-real report — the summary table, per-target token/cost data, and any
-`google-adk`/`openai` traces — belongs pasted in right here, replacing this
-paragraph, the same honest way every other capture on this page was pasted
-in after actually running the command shown.
+**Live run #4 — 2026-09-10.** [GitHub Actions run
+#4](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34539312259),
+triggered by `workflow_dispatch` on `main` at commit `772cab3`, model
+`claude-haiku-4-5`, all six targets, `dry_run: false`. Verbatim summary
+table from the job:
+
+```
+target       status       wall_s   tokens   cost_usd  final_text
+----------------------------------------------------------------
+google-adk   success       10.02     1716   0.002012  That text has 9 words.
+openai       success        2.56        0   0.000000  That text has 9 words.
+claude       success        3.54        -          -  That text has 9 words.
+crewai       success       25.52        -          -  That text has 9 words.
+autogen      error          0.22        -          -  TypeError: AsyncMessages.create() got an unexpected keyword ...
+langgraph    success        1.83        -          -  That text has 9 words.
+
+1 of 6 target(s) FAILED:
+  - autogen: TypeError: AsyncMessages.create() got an unexpected keyword argument 'temperature'
+```
+
+**Five of six SDKs executed a real turn from the same unmodified agent
+definition** — each called `claude-haiku-4-5`, invoked the `count_words`
+tool on the default 9-word prompt, and returned the identical answer,
+`"That text has 9 words."`. This is this project's central hypothesis
+demonstrated at runtime, not just at `build()` time.
+
+**`autogen` failed on a verified upstream incompatibility, not a CommonADK
+bug.** `autogen-ext` 0.7.5 hard-codes `"temperature":
+create_args.get("temperature", 1.0)` into every Anthropic request
+(`autogen_ext/models/anthropic/_anthropic_client.py`), and `anthropic` 1.x
+removed `temperature` from `messages.create()`. `examples/live-smoke/common`
+sets no `model_params` at all, so nothing CommonADK passed caused this
+failure — it is a known issue under investigation, being fixed by a
+separate change, not yet resolved as of this run.
+
+**`openai`'s `0` tokens / `$0.000000` is not a real measurement — read it as
+"not measured," never as "this call was free."** OpenAI Agents' `Usage`
+fields default to `0` rather than `None`, and usage isn't populated when the
+model runs through the LiteLLM bridge (`LitellmModel`, which is how this
+target reaches an `anthropic/...` model). A separate change is in progress
+to fix this reporting gap; until then, `openai`'s token/cost columns should
+not be trusted.
+
+`google-adk`'s 1,716 tokens / $0.002012 is genuine, captured end-to-end by
+the runner/telemetry layer (`commonadk.runners`).
+
+Worth noting as an observation, not a benchmark: wall time ranged from
+1.83s (`langgraph`) to 25.52s (`crewai`) for identical work — roughly a 14x
+spread. That's one sample, one model, on CI hardware; it says nothing
+general about relative SDK performance.
+
+Earlier attempts, briefly, for context: run #1 was a dry run (no model
+calls); run #2 failed because the secret was set on the Codespaces tab
+rather than the Actions tab; run #3 failed on account credit balance. Run
+#4, above, is the first that actually executed.
