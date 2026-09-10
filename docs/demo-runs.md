@@ -11,8 +11,11 @@ these captures come from (sections 4 and 5) or that reproduces the same
 
 No API keys exist in this environment, and none of the captures below used
 one — every `commonadk validate`/`render` and every `project.build(...)`
-call is pure, local, offline construction (see "Running for real" at the
-bottom for what a live `commonadk run` actually needs, per target).
+call is pure, local, offline construction (see "Running for real" below for
+what a live `commonadk run` actually needs, per target, and ["Live
+runs"](#live-runs) at the very bottom for the one workflow in this repo that
+actually spends money on a real model call, and its honesty rule: no output
+is pasted below until that workflow has actually been run).
 
 ## `commonadk --version`
 
@@ -217,3 +220,73 @@ a `targets.<target>.model` override), the required key changes accordingly
 — `OPENAI_API_KEY` for a native or LiteLLM-routed `openai/...` model on any
 target. See [`file-contracts.md`'s per-target override table](file-contracts.md#targets--per-target-overrides)
 for exactly what form each target's override expects.
+
+## Live runs
+
+Issue [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8), "Verified
+live runs" — everything above this section is offline construction; this is
+the one piece of the project that actually calls a real model.
+[`examples/live-smoke/common`](../examples/live-smoke/common) is a
+minimal project built for exactly this: one agent (`assistant`), one
+trivial, deterministic, no-network tool (`count_words`), and a
+`default_model` of `anthropic/claude-haiku-4-5` — the cheapest current
+Anthropic model — with **no** per-target `targets.<sdk>.model` override
+anywhere, because every one of the six adapters has a verified Anthropic
+path (see each adapter's own `_model_for`/`_client_for`/`_llm_for`, and the
+table in [`scripts/live_smoke.py`](../scripts/live_smoke.py)'s own module
+docstring): native for `claude`; `LiteLlm(model="anthropic/...")` for
+`google-adk`; `LitellmModel(model="anthropic/...")` for `openai`;
+`crewai.LLM(model="anthropic/...")`'s own provider routing for `crewai`;
+`AnthropicChatCompletionClient` for `autogen`; `init_chat_model("anthropic:...")`
+for `langgraph`. One `ANTHROPIC_API_KEY` genuinely drives all six.
+
+[`scripts/live_smoke.py`](../scripts/live_smoke.py) runs one real turn per
+target, records the outcome (success/error), wall time, and a truncated
+final answer, and — for `google-adk`/`openai`, the two targets
+`commonadk.runners` (issue #22) has a runner for — the full normalized
+trace, with token counts and cost, honest about any gap
+(`usage_complete`/`cost_complete` rather than a silently-summed partial
+total). The other four targets (`claude`, `crewai`, `autogen`, `langgraph`)
+have no runner yet, so their report entries carry `"usage": "unavailable"`
+explicitly — never `0`, which would misleadingly claim the call was free.
+It supports `--list` (print the target table and exit, no key needed),
+`--dry-run` (build every target's entry agent but never call the model, no
+key needed — this is what `tests/test_live_smoke.py` exercises offline),
+`--targets` (a comma-separated subset), and `--model` (`claude-haiku-4-5`
+by default; `claude-sonnet-5`/`claude-opus-5` are valid, more expensive
+opt-ins for a heavier check — never a date-suffixed model id). It fails
+loudly and immediately — before touching any target, before writing any
+file — if `ANTHROPIC_API_KEY` isn't set, rather than hanging on the first
+real SDK call or writing a misleadingly-empty report.
+
+**Triggering a run.** [`.github/workflows/live-runs.yml`](../.github/workflows/live-runs.yml)
+is `workflow_dispatch`-only — it never fires on `push` or `pull_request`,
+because unlike every other workflow in this repo (`ci.yml`, `publish.yml`'s
+own test/build jobs), this one spends real money. From the repo's Actions
+tab, run "Live runs" manually, optionally overriding `targets` (default: all
+six) and `model` (default: `claude-haiku-4-5`), or `dry_run: true` to
+exercise the workflow itself for free. It maps the repository secret
+`CLAUDE_API_KEY` onto the `ANTHROPIC_API_KEY` environment variable every SDK
+path actually reads (the secret is deliberately named `CLAUDE_API_KEY`, not
+`ANTHROPIC_API_KEY` — the workflow does the mapping so no SDK has to be
+told about that naming choice), detects a missing/empty secret in its own
+dedicated step rather than a job-level `if:` against `secrets.*` (the same
+detect-in-a-step pattern `publish.yml` uses for `PYPI_API_TOKEN`, adopted
+here for the same reason: a job-level `env:` condition on a secret silently
+evaluated false there), installs all six SDK extras, runs the script,
+writes the summary table to the job's `$GITHUB_STEP_SUMMARY`, and uploads
+the JSON report plus every per-target trace file as a build artifact.
+
+**No live run has been performed as of this writing.** Everything in this
+section — the project, the script, the workflow, and every test in
+`tests/test_live_smoke.py` — has been verified **offline only**: `commonadk
+validate`, `project.build(...)` for all six targets, `--list`, `--dry-run`,
+and the report/error-handling logic under monkeypatched stand-ins for each
+target's real execution path (never a real SDK call). No `ANTHROPIC_API_KEY`
+exists in the environment this was built in, and the task that built this
+explicitly forbade fabricating live output. Once a maintainer actually
+triggers the workflow with a real `CLAUDE_API_KEY` secret configured, its
+real report — the summary table, per-target token/cost data, and any
+`google-adk`/`openai` traces — belongs pasted in right here, replacing this
+paragraph, the same honest way every other capture on this page was pasted
+in after actually running the command shown.

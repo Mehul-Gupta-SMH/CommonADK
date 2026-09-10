@@ -414,6 +414,23 @@ token/cost data is and isn't available), the session model, the hook
 contract, and precisely how each of the four remaining SDKs will map when
 they're built.
 
+## Verified live runs
+
+Everything above is proven offline — no captured output in this repo has
+ever come from a real LLM call. [`examples/live-smoke`](examples/live-smoke)
+and [`scripts/live_smoke.py`](scripts/live_smoke.py) (issue #8) close that
+gap: a minimal project whose `default_model` is `anthropic/claude-haiku-4-5`
+routes all six targets through the same Anthropic model with no per-target
+override, and the script runs one real turn per target, recording outcome,
+wall time, and — for `google-adk`/`openai` — a full token/cost trace via
+`commonadk.runners` (the four other targets have no runner yet, so their
+report entries say `"usage": "unavailable"` explicitly, never `0`). It's
+wired up as a `workflow_dispatch`-only GitHub Actions workflow
+([`.github/workflows/live-runs.yml`](.github/workflows/live-runs.yml)) so it
+only runs — and only spends money — when a maintainer explicitly triggers
+it. See [`docs/demo-runs.md`](docs/demo-runs.md#live-runs) for how to
+trigger it and what the report looks like.
+
 ## Roadmap
 
 The full feature map — shipped, next up, and planned — lives in

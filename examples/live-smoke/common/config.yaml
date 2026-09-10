@@ -1,0 +1,21 @@
+name: live-smoke
+entry: assistant
+targets: [google-adk, openai, claude, crewai, autogen, langgraph]
+
+# Anthropic, directly -- every one of the six adapters has an Anthropic
+# path (native for "claude"; LiteLLM-wrapped for "google-adk"/"openai";
+# crewai.LLM's own provider parsing for "crewai"; a native
+# AnthropicChatCompletionClient for "autogen"; init_chat_model's
+# "anthropic:..." form for "langgraph" -- see each adapter's `_model_for`/
+# `_client_for`/`_llm_for`, and docs/demo-runs.md's "Live runs" section).
+# So a single ANTHROPIC_API_KEY drives every target with NO per-agent
+# `targets.<sdk>.model` override anywhere in this project -- unlike
+# examples/research-crew, which defaults to gemini and needs a
+# `targets.claude.model` override to build for "claude" at all.
+#
+# claude-haiku-4-5 is the cheapest current Anthropic model -- the right
+# default for a smoke test that just needs to prove the plumbing works.
+# claude-sonnet-5 / claude-opus-5 are valid, more capable alternatives for
+# a heavier check (see scripts/live_smoke.py --model); never append a date
+# suffix -- these three names are the only valid current model ids.
+default_model: anthropic/claude-haiku-4-5

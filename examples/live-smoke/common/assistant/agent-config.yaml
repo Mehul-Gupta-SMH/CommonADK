@@ -1,0 +1,8 @@
+name: assistant
+description: Counts the words in a short piece of text and reports the count.
+
+tools:
+  - count_words
+
+requires:
+  env: []

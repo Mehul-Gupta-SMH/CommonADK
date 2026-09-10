@@ -23,7 +23,7 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 
 | Feature | Issue |
 |---|---|
-| Verified live runs: one real LLM turn per target, secrets-gated | [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) |
+| Verified live runs: one real LLM turn per target, secrets-gated — workflow shipped, awaiting first run | [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) |
 | Mixed-target spawning, part two: cross-runtime edges over the wire (A2A), and sourcing an edge from a non-root island member | [#9](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/9) |
 
 ## Planned
