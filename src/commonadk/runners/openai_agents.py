@@ -8,9 +8,13 @@ Verified against the installed package: openai-agents 0.21.1 --
 `RawResponsesStreamEvent`), `agents/items.py` (`RunItemBase.agent`,
 `ToolCallItem`, `ToolCallOutputItem`, `HandoffOutputItem`, `ModelResponse`),
 `agents/usage.py` (`Usage.requests`/`.input_tokens`/`.output_tokens`/
-`.total_tokens`), `agents/memory/sqlite_session.py` (`SQLiteSession`). See
+`.total_tokens`), `agents/run_internal/run_loop.py` (`_requests_for_response_without_usage`,
+the "request completed without usage" path a LiteLLM-bridged call actually
+takes), `agents/memory/sqlite_session.py` (`SQLiteSession`). See
 docs/runner-design.md, "OpenAI Agents SDK" for the full mapping table,
-including the `0`-not-`None` usage wrinkle and the documented multi-agent
+including the `0`-not-`None` usage wrinkle (corrected after a live run
+exposed the `requests > 0` heuristic reporting a confident `0`/$0.000000`
+for usage the SDK never actually reported) and the documented multi-agent
 LLMCall-attribution gap this module implements exactly as described there.
 """
 
@@ -169,7 +173,9 @@ class OpenAIAgentsRunner(BaseRunner):
 
             for raw_response in result.raw_responses:
                 usage = raw_response.usage
-                reported = usage.requests > 0
+                reported = bool(
+                    usage.input_tokens or usage.output_tokens or usage.total_tokens
+                )
                 attributed_agent = current_agent_name if not multi_agent else None
                 attributed_model = model_name if not multi_agent else None
                 prompt_tokens = usage.input_tokens if reported else None
