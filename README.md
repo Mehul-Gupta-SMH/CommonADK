@@ -416,10 +416,12 @@ they're built.
 
 ## Verified live runs
 
-Everything above is proven offline — no captured output in this repo has
-ever come from a real LLM call. [`examples/live-smoke`](examples/live-smoke)
-and [`scripts/live_smoke.py`](scripts/live_smoke.py) (issue #8) close that
-gap: a minimal project whose `default_model` is `anthropic/claude-haiku-4-5`
+Five of the six targets have now executed a real turn from the same
+unmodified agent definition — see [the captured run in
+`docs/demo-runs.md`](docs/demo-runs.md#live-runs) for the verbatim results,
+including real token counts and cost. [`examples/live-smoke`](examples/live-smoke)
+and [`scripts/live_smoke.py`](scripts/live_smoke.py) (issue #8) are what
+produce them: a minimal project whose `default_model` is `anthropic/claude-haiku-4-5`
 routes all six targets through the same Anthropic model with no per-target
 override, and the script runs one real turn per target, recording outcome,
 wall time, and — for `google-adk`/`openai` — a full token/cost trace via
