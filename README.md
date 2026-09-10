@@ -342,6 +342,95 @@ project, and the design doc for the full three-layer model, the island
 algorithm, and the failure modes. This is in-process only — no network
 protocol between SDKs yet; that's future work (issue #9).
 
+## Running and observing
+
+`commonadk run` executes one turn and, by default, still just prints the
+final text — unchanged for anyone already using it. For `google-adk` and
+`openai` (`src/commonadk/runners/`, the execution/telemetry layer built for
+[#22](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/22)), two more
+flags turn that one line into a full, normalized step trace:
+
+```bash
+commonadk run examples/research-crew/common --target openai --stream \
+  "Research electric vehicle adoption"
+
+commonadk run examples/research-crew/common --target google-adk \
+  --trace trace.json "Research electric vehicle adoption"
+```
+
+`--stream` prints one line per normalized runtime event
+(`run_started`/`agent_started`/`llm_call`/`tool_call`/`transfer`/
+`agent_finished`/`run_finished`-or-`run_error`) as it happens; `--trace
+PATH` writes the full ordered event log plus roll-up totals (tokens, cost,
+wall time, a breakdown per agent) to `PATH` as JSON. Both work
+programmatically too, against the same `Project` any adapter builds from:
+
+```python
+from commonadk import load
+from commonadk.runners import get_runner
+
+project = load("examples/research-crew/common")
+runner = get_runner("openai")               # or "google-adk"
+trace = runner.run_sync(project, "coordinator", "Research EV adoption")
+
+print(trace.rollup())                         # totals, honest about gaps
+trace.write("trace.json")
+```
+
+**Every token/cost field is `Optional`, and `None` means "this SDK did not
+report it" — never `0`, never a guess.** A trace's roll-up marks itself
+`usage_complete: false` (with an explanation, not a silently wrong number)
+whenever any LLM call in the run didn't report usage; cost is derived only
+from tokens an SDK actually reported, against a small static pricing table
+that's labeled as a snapshot, not a live feed. Multi-turn conversations use
+a `RunSession`:
+
+```python
+from commonadk.runners import RunSession
+
+session = RunSession()
+runner.run_sync(project, "coordinator", "What's the latest on EV adoption?", session=session)
+runner.run_sync(project, "coordinator", "Now compare that to 2020.", session=session)  # same conversation
+```
+
+Hooks observe every event live (v1 is observe-only — a hook can't block or
+rewrite anything, only watch):
+
+```python
+from commonadk.runners import HookRegistry
+
+hooks = HookRegistry()
+hooks.register(lambda event: print(event.kind, event.seq))
+runner.run_sync(project, "coordinator", "hi", hooks=hooks)
+```
+
+`claude`, `crewai`, `autogen`, and `langgraph` don't have a runner yet —
+`commonadk run` for those targets works exactly as it always has (no
+`--stream`/`--trace`; those two flags give a clear error naming which
+targets do support them, rather than a silent no-op). See
+[`docs/runner-design.md`](docs/runner-design.md) for the full design: the
+normalized event model, the per-SDK mapping (including exactly where
+token/cost data is and isn't available), the session model, the hook
+contract, and precisely how each of the four remaining SDKs will map when
+they're built.
+
+## Verified live runs
+
+Everything above is proven offline — no captured output in this repo has
+ever come from a real LLM call. [`examples/live-smoke`](examples/live-smoke)
+and [`scripts/live_smoke.py`](scripts/live_smoke.py) (issue #8) close that
+gap: a minimal project whose `default_model` is `anthropic/claude-haiku-4-5`
+routes all six targets through the same Anthropic model with no per-target
+override, and the script runs one real turn per target, recording outcome,
+wall time, and — for `google-adk`/`openai` — a full token/cost trace via
+`commonadk.runners` (the four other targets have no runner yet, so their
+report entries say `"usage": "unavailable"` explicitly, never `0`). It's
+wired up as a `workflow_dispatch`-only GitHub Actions workflow
+([`.github/workflows/live-runs.yml`](.github/workflows/live-runs.yml)) so it
+only runs — and only spends money — when a maintainer explicitly triggers
+it. See [`docs/demo-runs.md`](docs/demo-runs.md#live-runs) for how to
+trigger it and what the report looks like.
+
 ## Roadmap
 
 The full feature map — shipped, next up, and planned — lives in
