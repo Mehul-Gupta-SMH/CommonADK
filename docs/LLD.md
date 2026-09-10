@@ -26,7 +26,24 @@ src/commonadk/
     ├── crewai_adapter.py          # AgentSpec -> crewai.Crew
     ├── autogen_adapter.py          # AgentSpec -> AssistantAgent / Swarm
     └── langgraph_adapter.py         # AgentSpec -> compiled langgraph StateGraph
+└── runners/
+    ├── __init__.py         # target -> runner registry, lazy SDK imports
+    ├── base.py               # BaseRunner ABC + RunSession (multi-turn state)
+    ├── events.py               # the normalized event model (frozen dataclasses)
+    ├── hooks.py                  # HookRegistry -- observe-only, isolate-and-report
+    ├── trace.py                    # Trace: ordered events + roll-up totals
+    ├── pricing.py                    # static USD/1M-token table, cost estimation
+    ├── google_adk.py                   # drives google.adk.runners.Runner, normalizes events
+    └── openai_agents.py                 # drives agents.Runner.run_streamed, normalizes events
 ```
+
+`adapters/` is build-time (`Project` + agent name -> one live SDK object);
+`runners/` (issue #22) is its run-time counterpart, driving that object for
+one turn and normalizing what happens into one event model — see
+[`runner-design.md`](runner-design.md) for the full design and the
+per-SDK mapping evidence. Only `google-adk` and `openai` have a runner so
+far; `claude`/`crewai`/`autogen`/`langgraph` are mapped (not built) in that
+doc's "What each of the four remaining SDKs will map to".
 
 `__init__.py` re-exports everything a caller needs without reaching into
 submodules: `load`, `render_mermaid`, `write_interaction_layer`,
@@ -989,6 +1006,117 @@ mirroring AutoGen's).
 eager providers (`gemini`, `openai`) is that provider's own unwrapped SDK
 error, not an adapter-specific one.
 
+## `runners/`
+
+The run-time counterpart to `adapters/` — see [`runner-design.md`](runner-design.md)
+for the full design (this section is the LLD-level summary; that doc is
+authoritative). No SDK import at module scope anywhere in this package,
+exactly like `adapters/`.
+
+### `events.py` — the normalized event model
+
+Eight frozen, `kw_only`, `slots=True` dataclasses, all inheriting `Event`'s
+`seq: int` (process-wide monotonic, `itertools.count`), `ts: float`
+(`time.time()`), and `run_id: str`: `RunStarted`, `AgentStarted`,
+`AgentFinished`, `LLMCall`, `ToolCall`, `Transfer`, `RunFinished`,
+`RunError`. Every subclass sets a `kind: ClassVar[str]` discriminator
+(`"run_started"`, `"llm_call"`, ...) that `Event.to_dict()` adds as a
+`"type"` key and `event_from_dict()` reads to reconstruct the right
+subclass — the two are exact inverses, so a `Trace` round-trips through
+JSON losslessly. **The load-bearing rule**: every token/cost/duration
+field on `LLMCall` (`model`, `prompt_tokens`, `completion_tokens`,
+`total_tokens`, `cost_usd`, `duration_ms`) and the matching totals on
+`RunFinished` default to `Optional[...] = None`, meaning "this SDK did not
+report it" — never `0`, never an estimate substituted in its place.
+
+### `hooks.py` — `HookRegistry`
+
+`register(callback, event_type=None)` (`None` = catch-all) /
+`fire(event)`. v1 is **observe-only**: a callback receives an `Event`
+after it happened and cannot block, rewrite, or veto anything about the
+run — see the design doc for exactly how this shape stays extensible to a
+future intervention hook without a breaking change. **Exception policy:
+isolate and report, never fail-fast** — `fire()` wraps every callback in
+`try/except Exception`, appends `(event, callback, exception)` to
+`self.errors`, `warnings.warn`s, and keeps calling the remaining hooks; a
+broken observer can never abort the run it's observing.
+
+### `trace.py` — `Trace`
+
+An ordered `list[Event]` (`.append`) plus `.rollup()` (overall + `per_agent`
+token/cost/tool-call totals), `.to_json()`/`.write(path)`/`.from_json()`/
+`.read(path)`. A sum is only ever computed over the events that actually
+reported the field being summed; `rollup()["llm_calls"]["usage_complete"]`/
+`["cost_complete"]` are `False`, with an explanatory `"note"`, whenever any
+`LLMCall` didn't report usage or wasn't priced — never silently summed into
+a total that looks complete but isn't.
+
+### `pricing.py`
+
+One static `dict[str, tuple[float, float]]` (bare model id -> USD per 1M
+input/output tokens), explicitly labeled as a snapshot that will drift.
+`estimate_cost_usd(model, prompt_tokens, completion_tokens)` returns `None`
+whenever the model isn't in the table or either token count is `None` —
+never called by a runner with a token count the SDK didn't actually report.
+
+### `base.py` — `BaseRunner` / `RunSession`
+
+`BaseRunner` mirrors `adapters.BaseAdapter`'s shape: `target: str` plus an
+abstract async `run(project, agent_name, prompt, *, session=None,
+hooks=None) -> Trace`, and a `run_sync` convenience wrapper
+(`asyncio.run`). Every implementation must emit `RunStarted` first, route
+every event through both `trace.append` and `hooks.fire` via the shared
+`_emit` helper, and end in exactly one of `RunFinished` or `RunError` —
+on any exception (including one from `project.build(...)` itself), emit a
+fatal `RunError` and RE-RAISE, so a `Trace` ending in `RunError` is an
+honest record of a failed run rather than a swallowed exception.
+`RunSession` (`session_id`, `turns`, `native: dict[str, Any]` keyed by
+target) holds per-target conversation state across turns; each runner
+reads/writes only its own `native[self.target]` slice.
+
+### `runners/__init__.py` — registry
+
+`_REGISTRY` (target -> module path, class name, pip extra) mirrors
+`adapters/__init__.py`'s shape; only `google-adk`/`openai` are registered.
+`_UNPORTED_TARGETS` (`claude`, `crewai`, `autogen`, `langgraph`) are real
+`adapters.known_targets()` entries with no runner yet. `get_runner(target)`
+raises, in order: `NotImplementedError` (target is unported, names the
+targets that do have a runner and points at `runner-design.md`'s mapping
+table), `ValueError` (target is unrecognized entirely, same message shape
+as `adapters.get_adapter`), or `ImportError` (target has a runner but the
+SDK isn't installed — same `pip install "commonadk[<extra>]"` hint style).
+
+### `google_adk.py` — `GoogleADKRunner`
+
+Drives `google.adk.runners.InMemoryRunner.run_async`'s `Event` stream.
+`Event.author` changes -> `AgentStarted`/`AgentFinished` (a heuristic — ADK
+has no explicit lifecycle-boundary event). `get_function_calls()`/
+`get_function_responses()`, paired by `FunctionCall.id`, -> `ToolCall`
+(this runner times the call/response pairing itself; ADK doesn't). `Event
+Actions.transfer_to_agent` -> `Transfer`. Non-`None` `Event.usage_metadata`
+-> `LLMCall` (one per usage-bearing event, so a tool-calling turn yields
+several). `LlmResponse.error_code`/`.error_message` -> an inline, non-fatal
+`RunError` (the ADK run loop itself kept going). `RunSession.native["google-adk"]`
+holds the bound `InMemoryRunner` + ADK session id, reused across turns.
+
+### `openai_agents.py` — `OpenAIAgentsRunner`
+
+Drives `agents.Runner.run_streamed(...).stream_events()`.
+`AgentUpdatedStreamEvent` -> `AgentStarted`/`AgentFinished`.
+`RunItemStreamEvent(name="tool_called"|"tool_output")`, paired by call id,
+-> `ToolCall`. `RunItemStreamEvent(name="handoff_occured")` (the SDK's own
+event name, misspelled) -> `Transfer`. `result.raw_responses` (each a
+`ModelResponse` with a `Usage`) -> `LLMCall`, emitted after the stream
+drains; `Usage.requests > 0` is the "usage reported" signal, since
+`Usage`'s token fields default to plain `int = 0`, not `Optional`. **Known
+v1 gap**: `ModelResponse` carries no agent-identifying field, so a run that
+spans a handoff cannot attribute individual `LLMCall`s to a specific
+agent — `agent_name`/`model` are `None` for every call in such a run
+(single-agent runs attribute precisely). `RunSession.native["openai"]`
+holds an `agents.SQLiteSession` (`:memory:`), reused across turns; the
+`Agent` object itself is rebuilt fresh each turn (stateless by SDK design,
+unlike Google ADK's cached runner+agent pair).
+
 ## `cli.py`
 
 Five subcommands plus `--version`, built with `argparse`
@@ -998,7 +1126,7 @@ Five subcommands plus `--version`, built with `argparse`
 |---|---|---|
 | `validate` | `common_dir` | Loads + validates; prints project name, entry agent, and per-agent model/tools/env status (env vars flagged `set`/`not set` against the current shell, `required`/`optional`) |
 | `render` | `common_dir` | Loads + validates, then `write_interaction_layer(common_dir, project.graph)`; prints the output path |
-| `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
+| `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] [--stream] [--trace PATH] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output. `--stream`/`--trace` route `google-adk`/`openai` through `runners/` (issue #22, `_cmd_run_via_runner`) for live event printing / a written JSON trace; the other four targets still use the original `_run_*` functions, and reject `--stream`/`--trace` with a clear message rather than a silent no-op (`_cmd_run`) |
 | `new` | `common_dir agent_name [--from AGENT --type {delegate,handoff}]` | Scaffolds `<agent_name>/{skill.md,tools.py,agent-config.yaml}` under `common_dir`; with `--from`, also appends an edge to `interactions.yaml` and regenerates `interaction-layer.md` (see below) |
 | `import` | `skills_dir common_dir [--entry NAME] [--name PROJECT] [--model ALIAS-OR-STRING]` | Turns a directory of SKILL.md files into a conforming `common/` project — one agent folder per skill (`skill.md` copied verbatim, `agent-config.yaml` + a stub `tools.py` generated); creates `config.yaml`/`interactions.yaml` for a new project, or extends an existing valid one (see below) |
 | `--version` | — | `argparse`'s built-in `action="version"`; prints `commonadk {version}` (via `importlib.metadata.version("commonadk")`, falling back to `"0.0.0+unknown"` if the package metadata isn't found) and exits `0` via `SystemExit` |
@@ -1191,10 +1319,20 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | `commonadk import`'s `common_dir` exists and is not a directory | `ValueError` | `cli._cmd_import` |
 | `commonadk import --entry` names neither an imported skill nor (in extend mode) an existing project agent | `ValueError` naming both lists | `cli._cmd_import` |
 | Any of the above surfacing through the CLI | printed to `stderr`, exit code `1` | `cli.main`'s `try/except` |
+| `commonadk run --target <target> --stream`/`--trace` where `<target>` is a real adapter target with no runner yet (`claude`/`crewai`/`autogen`/`langgraph`) | `ValueError` naming the targets that do have a runner, before anything runs | `cli._cmd_run` |
+| `get_runner(target)` called with a real `adapters.known_targets()` entry that has no runner yet | `NotImplementedError` naming the ported targets and pointing at `runner-design.md`'s mapping table | `runners.get_runner` |
+| `get_runner(target)` called with a target unrecognized by `adapters.known_targets()` entirely | `ValueError` naming the known adapter targets | `runners.get_runner` |
+| `get_runner(target)`'s target has a runner registered but its SDK isn't installed | `ImportError` (with `pip install "commonadk[...]"` hint) | `runners.get_runner` |
+| `event_from_dict(data)` given a `"type"` this version of `events.py` doesn't know | `ValueError` naming the known event types | `runners.events.event_from_dict` |
+| A runner's underlying SDK call raises anything (including a build failure re-raised from `project.build(...)`) | The original exception, re-raised after a fatal `RunError` event is emitted (see `runner-design.md`, "Fatal vs. inline RunError") — `commonadk run`'s CLI wrapper still funnels it through `cli.main`'s usual `try/except` | `runners.base.BaseRunner.run` (each concrete runner's `try/except Exception` around its own SDK calls) |
+| A registered hook callback raises | Caught, recorded in `HookRegistry.errors`, surfaced via `warnings.warn` — never propagated, never aborts the run | `runners.hooks.HookRegistry.fire` |
 
 ## Testing layout
 
-All 207 tests live under `tests/`, sharing two fixtures from
+243 tests live under `tests/` (207 pre-`runners/`, plus `test_runners.py`'s
+36 — event model, hooks, trace roll-ups, the runner registry, and
+normalization of real, constructed `google.adk`/`agents` SDK objects
+through each runner's mapping, all offline), sharing two fixtures from
 `tests/conftest.py`: `example_common_dir` (path to
 `examples/research-crew/common`, read-only) and `tmp_project` (a
 `tmp_path`-backed mutable copy of the same, for tests that deliberately
@@ -1213,7 +1351,13 @@ since this adapter needs both packages). `test_hypothesis.py` gates
 per-target *inside* the parametrized test body instead, via the same
 module-name mapping, so that one file always collects regardless of which
 subset of SDKs is installed, skipping only the individual parametrized
-cases whose SDK is missing rather than the whole file.
+cases whose SDK is missing rather than the whole file. `test_runners.py`
+follows that same per-test pattern rather than `test_adapter_*.py`'s
+module-scope one, for the same reason: its event-model/hooks/trace/registry
+tests need no SDK at all and must keep running even when neither
+`google-adk` nor `openai-agents` is installed, so only the Google
+ADK/OpenAI Agents normalization tests carry their own
+`pytest.importorskip("google.adk")`/`pytest.importorskip("agents")` calls.
 
 **Fake-key fixture patterns.** Two fixtures recur across every adapter test
 file (each file defines its own local copy; `test_hypothesis.py`'s

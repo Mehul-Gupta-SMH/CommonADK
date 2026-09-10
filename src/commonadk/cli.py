@@ -9,8 +9,18 @@ SKILL.md interoperability:
 - `commonadk render <common-dir>` -- regenerate `interaction-layer.md` from
   `interactions.yaml`.
 - `commonadk run <common-dir> --target
-  {google-adk,openai,claude,crewai,autogen,langgraph} PROMPT` -- build an
-  agent for a target SDK and execute one turn.
+  {google-adk,openai,claude,crewai,autogen,langgraph} [--stream] [--trace
+  PATH] PROMPT` -- build an agent for a target SDK and execute one turn.
+  With neither `--stream` nor `--trace`, prints just the final text --
+  unchanged for anyone already using it. For `google-adk`/`openai`
+  (`commonadk.runners`, issue #22), `--stream` additionally prints one line
+  per normalized runtime event (`RunStarted`/`AgentStarted`/`LLMCall`/
+  `ToolCall`/`Transfer`/`AgentFinished`/`RunFinished`|`RunError`) as it
+  happens, and `--trace PATH` writes the full JSON event trace (with
+  token/cost roll-ups, honest about what wasn't reported -- see
+  `docs/runner-design.md`) to `PATH`. The other four targets don't have a
+  runner yet -- passing `--stream`/`--trace` for one of them is a clear
+  error naming which targets do, not a silent no-op.
 - `commonadk new <common-dir> <agent-name> [--from AGENT --type
   {delegate,handoff}]` -- scaffold a new, conforming agent folder
   (`skill.md`, `tools.py`, `agent-config.yaml`) inside an existing `common/`
@@ -63,7 +73,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import yaml
 
@@ -354,6 +364,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--agent",
         default=None,
         help="Agent to run (default: the project's entry agent)",
+    )
+    run_p.add_argument(
+        "--stream",
+        action="store_true",
+        help=(
+            "Print normalized runtime events live as they arrive "
+            "(google-adk, openai only -- see docs/runner-design.md)"
+        ),
+    )
+    run_p.add_argument(
+        "--trace",
+        dest="trace_path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write the normalized JSON event trace to PATH "
+            "(google-adk, openai only -- see docs/runner-design.md)"
+        ),
     )
     run_p.add_argument("prompt", help="The user message to send")
 
@@ -784,7 +812,14 @@ def _cmd_import(
     return 0
 
 
-def _cmd_run(common_dir: str, target: str, agent: Optional[str], prompt: str) -> int:
+def _cmd_run(
+    common_dir: str,
+    target: str,
+    agent: Optional[str],
+    prompt: str,
+    stream: bool = False,
+    trace_path: Optional[str] = None,
+) -> int:
     project, caught_warnings = _load_project(common_dir)
     _print_warnings(caught_warnings)
 
@@ -798,6 +833,30 @@ def _cmd_run(common_dir: str, target: str, agent: Optional[str], prompt: str) ->
             f"commonadk: unknown agent {agent_name!r}. Known agents: "
             f"{sorted(project.agents)}"
         )
+
+    from .runners import known_targets as runner_known_targets
+
+    if target in runner_known_targets():
+        # Ported: drive it through runners/ (issue #22), which normalizes
+        # execution into events regardless of --stream/--trace -- default
+        # output (no flags) is still exactly one print(final_text) line,
+        # unchanged from before.
+        return _cmd_run_via_runner(project, target, agent_name, prompt, stream, trace_path)
+
+    if stream or trace_path:
+        from .runners import known_unported_targets
+
+        if target in known_unported_targets():
+            raise ValueError(
+                f"commonadk: --stream/--trace need a ported runner; target "
+                f"{target!r} does not have one yet (only "
+                f"{runner_known_targets()} do). See docs/runner-design.md "
+                "for the planned mapping. Run without --stream/--trace to "
+                "use the original build-and-print path for this target."
+            )
+        # else: not a runner target and not a known "unported" adapter
+        # target either -- fall through below, where get_adapter(target)
+        # raises the usual "unknown target" error.
 
     runner = _RUN_TARGETS.get(target)
     if runner is None:
@@ -813,6 +872,82 @@ def _cmd_run(common_dir: str, target: str, agent: Optional[str], prompt: str) ->
     output = runner(project, agent_name, prompt)
     print(output)
     return 0
+
+
+def _cmd_run_via_runner(
+    project: "Project",
+    target: str,
+    agent_name: str,
+    prompt: str,
+    stream: bool,
+    trace_path: Optional[str],
+) -> int:
+    """`commonadk run` for a target `runners/` has a runner for (issue #22).
+
+    Builds its own `Trace` from a catch-all hook (rather than trusting the
+    `Trace` `runner.run()` returns) specifically so `--trace` still writes
+    every event up to and including a fatal `RunError` even when `run()`
+    itself raises -- see docs/runner-design.md, "CLI integration".
+    """
+    from .runners import HookRegistry, RunFinished, Trace, get_runner
+
+    runner = get_runner(target)
+    hooks = HookRegistry()
+    trace = Trace()
+    hooks.register(trace.append)
+    if stream:
+        hooks.register(lambda event: print(_format_stream_event(event)))
+
+    try:
+        runner.run_sync(project, agent_name, prompt, hooks=hooks)
+    finally:
+        if trace_path:
+            trace.write(trace_path)
+
+    final_text = None
+    for event in reversed(trace.events):
+        if isinstance(event, RunFinished):
+            final_text = event.final_text
+            break
+    print(final_text if final_text is not None else "")
+    return 0
+
+
+def _format_stream_event(event: Any) -> str:
+    """One human-readable line per normalized runtime event, for `--stream`."""
+    from .runners import (
+        AgentFinished,
+        AgentStarted,
+        LLMCall,
+        RunError,
+        RunFinished,
+        RunStarted,
+        ToolCall,
+        Transfer,
+    )
+
+    if isinstance(event, RunStarted):
+        return f"[{event.seq}] run_started target={event.target} agent={event.agent_name}"
+    if isinstance(event, AgentStarted):
+        return f"[{event.seq}] agent_started agent={event.agent_name}"
+    if isinstance(event, AgentFinished):
+        return f"[{event.seq}] agent_finished agent={event.agent_name}"
+    if isinstance(event, ToolCall):
+        suffix = f" error={event.error}" if event.error else ""
+        return f"[{event.seq}] tool_call agent={event.agent_name} tool={event.tool_name}{suffix}"
+    if isinstance(event, Transfer):
+        return (
+            f"[{event.seq}] transfer {event.from_agent} -> {event.to_agent} "
+            f"({event.transfer_kind})"
+        )
+    if isinstance(event, LLMCall):
+        tokens = "unreported" if event.total_tokens is None else str(event.total_tokens)
+        return f"[{event.seq}] llm_call agent={event.agent_name} model={event.model} tokens={tokens}"
+    if isinstance(event, RunError):
+        return f"[{event.seq}] run_error {event.error_type}: {event.message}"
+    if isinstance(event, RunFinished):
+        return f"[{event.seq}] run_finished usage_complete={event.usage_complete}"
+    return f"[{event.seq}] {event.kind}"  # pragma: no cover -- defensive fallback
 
 
 # -- per-target execution (SDK imports are lazy, inside these functions) ----
@@ -957,7 +1092,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "render":
             return _cmd_render(args.common_dir)
         if args.command == "run":
-            return _cmd_run(args.common_dir, args.target, args.agent, args.prompt)
+            return _cmd_run(
+                args.common_dir,
+                args.target,
+                args.agent,
+                args.prompt,
+                stream=args.stream,
+                trace_path=args.trace_path,
+            )
         if args.command == "new":
             return _cmd_new(
                 args.common_dir, args.agent_name, args.from_agent, args.edge_type

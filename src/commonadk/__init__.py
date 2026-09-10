@@ -9,6 +9,7 @@ from .adapters import BaseAdapter, get_adapter
 from .loader import load
 from .mermaid import render_mermaid, write_interaction_layer
 from .mixed import MixedSystem, RuntimeUnit, build_mixed
+from .runners import BaseRunner, get_runner
 from .models import (
     AgentConfig,
     AgentSpec,
@@ -32,6 +33,8 @@ __all__ = [
     "MixedSystem",
     "RuntimeUnit",
     "build_mixed",
+    "BaseRunner",
+    "get_runner",
     "AgentConfig",
     "AgentSpec",
     "EnvRequirement",
