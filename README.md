@@ -86,6 +86,7 @@ commonadk validate examples/research-crew/common
 commonadk render examples/research-crew/common
 commonadk run examples/research-crew/common --target openai "Research electric vehicle adoption"
 commonadk new examples/research-crew/common reviewer --from writer --type handoff
+commonadk import path/to/skills examples/research-crew/common
 ```
 
 `validate` loads and checks a project, printing each agent's resolved model,
@@ -97,7 +98,23 @@ scaffolds a conforming agent folder (`skill.md`, `tools.py`, `agent-
 config.yaml`) inside an existing `common/` — output that passes `commonadk
 validate` immediately — and refuses to overwrite an existing folder;
 `--from <agent> --type {delegate,handoff}` additionally appends an edge to
-`interactions.yaml` and regenerates `interaction-layer.md` for you.
+`interactions.yaml` and regenerates `interaction-layer.md` for you. `import`
+turns a directory of `SKILL.md` files into a conforming `common/` project —
+one agent folder per skill, `skill.md` copied verbatim (frontmatter
+included; see "skill.md's frontmatter" below), `agent-config.yaml` and a
+stub `tools.py` generated to match — and, like `new`, its output passes
+`commonadk validate` immediately.
+
+**Importing existing SKILL.md libraries.** If you already have a directory
+of `SKILL.md` files — Spotify's `portal-ai-plugins`-style nested
+`skills/<name>/SKILL.md`, or a flat directory of `*.md` files — `commonadk
+import <skills-dir> <common-dir>` turns it into a `common/` project with no
+edges invented between the imported agents (`interactions.yaml` gets an
+`entry:` and nothing else — you wire real relationships in afterward, e.g.
+with `commonadk new --from`). Run it again pointed at the same
+`<common-dir>` to add more skills to an already-imported project; it
+refuses to touch a directory that's neither empty nor already a valid
+commonadk project.
 
 For a runnable, offline tour of all of the above — including `project.build()`
 against all six targets and real captured CLI output — see
@@ -148,7 +165,13 @@ requires:
 ```
 
 **`<agent>/skill.md`** — plain Markdown instructions, passed through as the
-agent's system prompt (optional YAML frontmatter is stripped).
+agent's system prompt. Optional YAML frontmatter (`---`/YAML/`---` at the
+very start of the file) is stripped from the instructions text; if it sets
+`name` or `description`, those are reconciled against `agent-config.yaml`
+(which always wins on a conflict) rather than just discarded — see
+[`docs/file-contracts.md`](docs/file-contracts.md#commonagentskillmd)
+for the full precedence rules. This is what lets `commonadk import` (above)
+carry a `SKILL.md` file's frontmatter straight through unmodified.
 
 **`<agent>/tools.py`** — plain functions. Type hints on every parameter and a
 docstring are **required**, checked at validate time — they're what every
