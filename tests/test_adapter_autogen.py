@@ -27,6 +27,7 @@ from autogen_agentchat.agents import AssistantAgent  # noqa: E402
 from autogen_agentchat.teams import Swarm  # noqa: E402
 from autogen_ext.models.anthropic import AnthropicChatCompletionClient  # noqa: E402
 from autogen_ext.models.openai import OpenAIChatCompletionClient  # noqa: E402
+from commonadk.adapters import autogen_adapter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +264,96 @@ def test_anthropic_model_routes_to_native_client_with_explicit_model_info(
     assert client._create_args["model"] == "claude-sonnet-5"
     assert client.model_info["function_calling"] is True
     assert _tool_names(agent) == {"count_words", "format_as_markdown"}  # tools survived
+
+
+def test_anthropic_version_guard_allows_compatible_anthropic(
+    tmp_project, tavily_env, provider_keys_env, monkeypatch
+):
+    """Verified-compatible `anthropic` versions (<1) must not block the
+    build -- exercised explicitly (independent of whatever `anthropic`
+    happens to be installed in the test environment) by faking the version
+    the guard reads (see module docstring, "VERIFIED UPSTREAM
+    INCOMPATIBILITY" and `_check_anthropic_temperature_compat`).
+    """
+
+    real_installed_version = autogen_adapter._installed_version
+
+    def fake_installed_version(package: str) -> str | None:
+        if package == "anthropic":
+            return "0.122.0"
+        return real_installed_version(package)
+
+    monkeypatch.setattr(autogen_adapter, "_installed_version", fake_installed_version)
+
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "smart"  # -> anthropic/claude-sonnet-5
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    agent = project.build("writer", target="autogen")  # must not raise
+
+    assert isinstance(agent._model_client, AnthropicChatCompletionClient)
+
+
+def test_anthropic_version_guard_raises_clear_error_for_incompatible_anthropic(
+    tmp_project, tavily_env, provider_keys_env, monkeypatch
+):
+    """`anthropic>=1` removed `temperature` from `messages.create()`, which
+    breaks autogen_ext's Anthropic client unconditionally (see module
+    docstring, "VERIFIED UPSTREAM INCOMPATIBILITY" -- reproduced live in a
+    real venv, not asserted from memory). This must surface as a clear
+    commonadk `RuntimeError` naming both installed versions and the fix,
+    never as the raw upstream `TypeError` a caller would otherwise only see
+    at `run()` time. Faking the installed version here (rather than
+    installing a real `anthropic>=1`) keeps this test offline and
+    independent of what's actually installed -- the guard's own logic is
+    what's under test, and it was verified for real against a live
+    `anthropic==1.5.0` install (see the drafted repro in the scratchpad /
+    PR description).
+    """
+
+    def fake_installed_version(package: str) -> str | None:
+        if package == "anthropic":
+            return "1.5.0"
+        if package == "autogen-ext":
+            return "0.7.5"
+        return None
+
+    monkeypatch.setattr(autogen_adapter, "_installed_version", fake_installed_version)
+
+    writer_cfg = tmp_project / "writer" / "agent-config.yaml"
+    data = yaml.safe_load(writer_cfg.read_text())
+    data["model"] = "smart"  # -> anthropic/claude-sonnet-5
+    writer_cfg.write_text(yaml.safe_dump(data))
+
+    project = commonadk.load(tmp_project)
+    with pytest.raises(RuntimeError) as exc_info:
+        project.build("writer", target="autogen")
+
+    message = str(exc_info.value)
+    assert "anthropic==1.5.0" in message
+    assert "autogen-ext==0.7.5" in message
+    assert "temperature" in message
+    assert "pip install 'anthropic<1'" in message
+    assert "TypeError" not in type(exc_info.value).__name__
+
+
+def test_anthropic_version_guard_skips_when_anthropic_not_installed(
+    tmp_project, tavily_env, provider_keys_env, monkeypatch
+):
+    """No installed `anthropic` package at all -- the guard must not raise
+    its own error (a different, clearer ImportError from `autogen_ext`
+    itself would surface first in that real scenario); this only exercises
+    the guard function's own early-return, not a real missing-package
+    environment (this test file's module-level `pytest.importorskip`
+    already guarantees `autogen_agentchat` -- and transitively `anthropic`,
+    since `AnthropicChatCompletionClient` is imported at module scope here
+    -- really is installed).
+    """
+    monkeypatch.setattr(autogen_adapter, "_installed_version", lambda package: None)
+
+    autogen_adapter._check_anthropic_temperature_compat()  # must not raise
 
 
 def test_unsupported_provider_raises_clear_error(tmp_project, tavily_env, provider_keys_env):

@@ -66,6 +66,46 @@ autogen = [
     # No installed code path this project's tests exercise is affected.
     "autogen-agentchat",
     "autogen-ext[openai,anthropic]",
+    # `anthropic<1` -- REQUIRED, not a style choice. Verified live (M8 first
+    # live run, all six targets, model anthropic/claude-haiku-4-5): AutoGen's
+    # native Anthropic client (autogen_ext.models.anthropic._anthropic_client,
+    # still true as of autogen-ext 0.7.5) unconditionally injects
+    # `"temperature": create_args.get("temperature", 1.0)` into EVERY
+    # Anthropic request it builds, even when the caller passes no
+    # `model_params` at all -- there is no commonadk-side way to suppress
+    # this, it happens inside autogen_ext's own `create`/`create_stream`
+    # (see autogen_adapter.py's module docstring for the full citation).
+    # `anthropic>=1` (confirmed: the 0.125.0 -> 1.0.0 jump, still true at
+    # 1.5.0, both checked directly against the installed
+    # `AsyncMessages.create` signature) removed the `temperature` parameter
+    # from `messages.create()`/`AsyncMessages.create()` entirely, so that
+    # hard-coded kwarg becomes `TypeError: AsyncMessages.create() got an
+    # unexpected keyword argument 'temperature'` on every Anthropic-routed
+    # call -- reproduced directly in a clean venv with
+    # `anthropic>=1 autogen-ext[anthropic]==0.7.5` installed, no network
+    # call needed (the TypeError fires at Python argument-binding time,
+    # before any HTTP request). This is why the `autogen` extra's own CI
+    # leg (`pip install -e ".[dev,autogen]"`, no other extra installed to
+    # pull in an older transitive `anthropic` pin) resolved anthropic 1.5.0
+    # and the M8 live run failed in 0.22s, never reaching the API. Checked
+    # this pin doesn't fight any other extra's own `anthropic` constraint:
+    # `claude-agent-sdk` (the `claude` extra) does not depend on the
+    # `anthropic` PyPI package at all (it talks to the Claude Code CLI, not
+    # the Anthropic Python SDK -- confirmed via its wheel's own
+    # Requires-Dist, which never mentions `anthropic`); `langchain-anthropic`
+    # (the `langgraph` extra) requires `anthropic<2.0.0,>=0.120.0`, which
+    # `anthropic<1` sits comfortably inside; plain `litellm` (the `google`/
+    # `openai`/`crewai` extras' shared dependency) does not require the
+    # `anthropic` package at all outside its own unused `proxy-runtime`
+    # extra. A real `pip install -e ".[google,openai,claude,crewai,autogen,
+    # langgraph,dev]"` with this pin in place resolves cleanly to
+    # anthropic==0.125.0 with `pip check` reporting no broken requirements.
+    # This pin AVOIDS the upstream bug (autogen_ext still hard-codes the
+    # kwarg; it is not fixed), it does not fix it -- see
+    # autogen_adapter.py's module docstring for the runtime guard that
+    # protects an environment where something else upgrades `anthropic`
+    # past this pin after install.
+    "anthropic<1",
 ]
 langgraph = [
     # LangGraph itself (prebuilt agent nodes, StateGraph, the Command
