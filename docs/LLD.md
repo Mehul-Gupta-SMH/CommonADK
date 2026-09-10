@@ -16,7 +16,7 @@ src/commonadk/
 ├── loader.py            # common/ -> Project pipeline
 ├── validation.py         # cross-cutting checks over a loaded-but-unwrapped project
 ├── mermaid.py             # interactions.yaml -> mermaid rendering
-├── cli.py                  # argparse CLI: validate | render | run | new | --version
+├── cli.py                  # argparse CLI: validate | render | run | new | import | --version
 └── adapters/
     ├── __init__.py         # target -> adapter registry, lazy SDK imports
     ├── base.py               # BaseAdapter ABC + shared env-preflight/BFS
@@ -213,13 +213,42 @@ collection, then one accumulated raise:
      folder, appends a `"duplicate agent name '...'"` error and skips this
      folder — the *first* folder claiming a name wins, later ones are
      dropped from the project.
-   - `_load_skill(folder, cfg.name, errors)` — reads `skill.md`; missing
-     file appends an error and returns `""`. Frontmatter is stripped with
-     `_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n?", re.DOTALL)`
-     applied once (`count=1`) at the start of the file, then the remaining
-     text is `.strip()`-ed. A body containing a `---`-delimited block *not*
-     at the very start of the file is left untouched (the regex is
-     anchored with `\A`).
+   - `_load_skill(folder, cfg, errors, skill_warnings)` — reads `skill.md`;
+     missing file appends an error and returns `""`. Frontmatter (`---`,
+     YAML, `---`) is matched with `_FRONTMATTER_RE = re.compile(r"\A---\s*\n
+     (?P<yaml>.*?\n)---\s*\n?", re.DOTALL)`, applied once, anchored at the
+     very start of the file (a `---`-delimited block anywhere else is left
+     untouched, treated as ordinary Markdown). No match: `text.strip()` is
+     returned unchanged — the pre-feature-1 behavior exactly, asserted by
+     `test_skill_md_without_frontmatter_is_unchanged`
+     (`tests/test_loader.py`). A match: the `yaml` group is
+     `yaml.safe_load`-ed (a `yaml.YAMLError`, or a parse result that isn't a
+     mapping, appends an `"invalid frontmatter YAML"` /
+     `"must be a YAML mapping"` error naming the file and returns just the
+     stripped body) and reconciled against `cfg` (this agent's already-
+     loaded `AgentConfig`, now passed in whole rather than just its name so
+     this can happen):
+     - `name`, if present and it disagrees with `cfg.name`, is an error (in
+       the style of `validation._check_folder_names`).
+     - `description`, if present and `cfg.description` is `""`, is adopted
+       onto `cfg` **in place** (so every later reader of `cfg` — including
+       `validate(...)` a few lines below and every `AgentSpec` built from
+       it — sees the reconciled value); if both are set and differ,
+       `cfg.description` wins and a message is appended to
+       `skill_warnings` (not `errors`).
+     - Every other frontmatter key is warned about via `skill_warnings`,
+       never errored — the one deliberate asymmetry with every other
+       `common/` YAML file's `extra="forbid"` (see file-contracts.md,
+       "skill.md — frontmatter semantics and precedence", for the
+       rationale: this file is a surface other agent-SDK hosts read and
+       extend too).
+     The returned string, either way, is always just the stripped body —
+     frontmatter (whatever its content) never appears in
+     `AgentSpec.instructions`. `skill_warnings` collected here is combined
+     with `validate(...)`'s own `val_warnings` before either is emitted
+     (`for message in [*skill_warnings, *val_warnings]: _warnings.warn(...)`,
+     step 8 below) — same non-fatal treatment, same "only emitted if the
+     overall load has zero errors" gating.
    - `_load_tools(folder, cfg.name, errors)` — reads `tools.py` via
      `importlib.util.spec_from_file_location(f"commonadk._loaded_tools.{folder.name}",
      path)`, then `importlib.util.module_from_spec` +
@@ -962,7 +991,7 @@ error, not an adapter-specific one.
 
 ## `cli.py`
 
-Four subcommands plus `--version`, built with `argparse`
+Five subcommands plus `--version`, built with `argparse`
 (`subparsers.add_parser`, `dest="command", required=True`).
 
 | Command | Args | Behavior |
@@ -971,6 +1000,7 @@ Four subcommands plus `--version`, built with `argparse`
 | `render` | `common_dir` | Loads + validates, then `write_interaction_layer(common_dir, project.graph)`; prints the output path |
 | `run` | `common_dir --target {google-adk,openai,claude,crewai,autogen,langgraph} [--agent NAME] prompt` | Loads, builds one agent for `target`, executes a single turn, prints the final text output |
 | `new` | `common_dir agent_name [--from AGENT --type {delegate,handoff}]` | Scaffolds `<agent_name>/{skill.md,tools.py,agent-config.yaml}` under `common_dir`; with `--from`, also appends an edge to `interactions.yaml` and regenerates `interaction-layer.md` (see below) |
+| `import` | `skills_dir common_dir [--entry NAME] [--name PROJECT] [--model ALIAS-OR-STRING]` | Turns a directory of SKILL.md files into a conforming `common/` project — one agent folder per skill (`skill.md` copied verbatim, `agent-config.yaml` + a stub `tools.py` generated); creates `config.yaml`/`interactions.yaml` for a new project, or extends an existing valid one (see below) |
 | `--version` | — | `argparse`'s built-in `action="version"`; prints `commonadk {version}` (via `importlib.metadata.version("commonadk")`, falling back to `"0.0.0+unknown"` if the package metadata isn't found) and exits `0` via `SystemExit` |
 
 **`new` in detail.** `_cmd_new` (1) refuses outright if `common_dir/
@@ -997,9 +1027,66 @@ here or anywhere else. `--type` without `--from` is rejected up front
 Warnings from the final reload are surfaced via `_print_warnings`, matching
 `validate`/`render`/`run`.
 
+**`import` in detail.** `_cmd_import` (1) discovers every skill file under
+`skills_dir` via `_discover_skill_sources` — both layouts scanned
+unconditionally, nested `<name>/SKILL.md` (subdirectories, sorted) then
+flat `*.md` (sorted) — raising `ValueError` if `skills_dir` doesn't exist
+or nothing is found; each source's raw name/description come from
+`_parse_skill_frontmatter` (best-effort — reuses `loader._FRONTMATTER_RE`
+so "what counts as frontmatter" can't drift from load-time parsing;
+malformed/missing frontmatter here just means nothing to derive, never
+raises — the real frontmatter contract is enforced by the reload in step
+(6)). (2) Decides new-vs-extend for `common_dir` — nonexistent or empty:
+new project; non-empty: tries `_load_project` (the same `loader.load`
+every other command uses) and either extends it (below) on success, or
+raises `ValueError` ("refusing to import ... not empty ... not a valid
+commonadk project") on a `ValidationError`, embedding that error's own text
+— a non-empty, not-already-valid `common_dir` is never written into.
+(3) Normalizes every discovered skill's raw name via `_normalize_agent_name`
+(lowercase, `[a-z0-9_-]` only, no leading/trailing `-`/`_`/`.` — chosen
+because those are the only real constraints commonadk itself has: folder
+name must equal `name:`, names must be unique, and a name starting with
+`.` would be silently skipped by `_discover_agent_folders`; an
+already-clean name like Spotify's `actions` or `bulk-reader` passes through
+byte-for-byte), resolving any collision — between two freshly-discovered
+skills, or against an existing project's own agents in extend mode — with
+a deterministic `-2`, `-3`, ... suffix. (4) Resolves the entry agent:
+`--entry` if given (validated against the union of newly-imported and
+pre-existing agent names); else the existing project's own entry
+(extend mode, unset only); else the alphabetically-first imported name,
+reported as "chosen automatically". (5) Writes one agent folder per skill:
+`skill.md` is `source.path.read_text()` passed through
+`_reconcile_skill_name` (a **targeted single-line substitution** —
+`_FRONTMATTER_NAME_LINE_RE = re.compile(r"(?m)^name:[ \t]*.*$")` on just
+the frontmatter's `name:` line, not a full YAML re-serialization, so
+quoting/spacing choices in every other line survive untouched) — a no-op
+unless the file's own frontmatter `name` disagrees with the *normalized*
+folder name it's about to be written into (which loader.py's own
+frontmatter reconciliation, feature 1, would otherwise reject as a
+mismatch); `agent-config.yaml` is `yaml.safe_dump({name, description,
+tools: [], requires: {env: []}})`; `tools.py` is
+`_IMPORTED_AGENT_TOOLS_PY`, a docstring-only stub with no functions
+(verified legal: `validation._check_tools` only ever iterates
+`agent-config.yaml`'s `tools:` list, so an empty one is never checked
+against `tools.py` at all). New-project mode additionally writes
+`config.yaml` (`name` from `--name` or `skills_dir`'s own folder name;
+`default_model`/`model_aliases` from `--model` — a literal `"provider/model"`
+string is used directly with no aliases needed since it already contains
+`/`; a bare alias name gets one `model_aliases` entry pointing at
+`_DEFAULT_IMPORT_MODEL = "anthropic/claude-sonnet-5"`, `--model`'s own
+default) and `interactions.yaml` (`entry` only, `edges: []` — **no edge is
+ever invented** between imported skills, since nothing in a SKILL.md
+library declares one). Extend mode rewrites `config.yaml`/
+`interactions.yaml`'s `entry` only if `--entry` explicitly asked for a
+different one than the project already has. (6) Reloads the result through
+`_load_project` (same path `commonadk validate` runs) and calls
+`write_interaction_layer` — so a caller's very next `commonadk validate
+common_dir` is re-running a check `_cmd_import` already ran on itself.
+
 **Lazy SDK imports.** `validate` and `render` only touch `loader.py` and
 `mermaid.py`, neither of which imports any agent SDK at module scope, so
-both commands work with zero SDKs installed. `run` needs exactly one SDK —
+both commands work with zero SDKs installed. `import` and `new` are the
+same. `run` needs exactly one SDK —
 its imports live inside each target's own `_run_*` function
 (`_run_google_adk`, `_run_openai`, `_run_claude`, `_run_crewai`,
 `_run_autogen`, `_run_langgraph`), never at module scope, so
@@ -1059,6 +1146,10 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | `agent-config.yaml` missing, invalid YAML, unknown key, or fails `AgentConfig` validation | `ValidationError` (accumulated) | `loader._load_agent_config` |
 | Two agent folders declare the same `name:` | `ValidationError` (accumulated) | `loader.load` |
 | `skill.md` missing | `ValidationError` (accumulated) | `loader._load_skill` |
+| `skill.md` frontmatter `name` disagrees with `agent-config.yaml`'s `name:` | `ValidationError` (accumulated) | `loader._load_skill` |
+| `skill.md` frontmatter YAML is malformed, or doesn't parse to a mapping | `ValidationError` (accumulated) | `loader._load_skill` |
+| `skill.md` frontmatter `description` disagrees with a non-empty `agent-config.yaml` `description:` (agent-config.yaml wins) | `UserWarning` (non-fatal) | `loader._load_skill` |
+| `skill.md` frontmatter has a key other than `name`/`description` | `UserWarning` (non-fatal) | `loader._load_skill` |
 | `tools.py` missing, or raises while importing | `ValidationError` (accumulated) | `loader._load_tools` |
 | Tool in `agent-config.yaml` not defined in `tools.py` | `ValidationError` (accumulated) | `validation._check_tools` |
 | Tool missing a docstring or a parameter type hint | `ValidationError` (accumulated) | `validation._check_tools` |
@@ -1095,11 +1186,15 @@ targets" list that could drift from `adapters/__init__.py`'s registry.
 | `commonadk new`'s target agent folder already exists | `ValueError` (before any file is written) | `cli._cmd_new` |
 | `commonadk new --type` given without `--from` | `ValueError` (before any file is written) | `cli._cmd_new` |
 | `commonadk new --from` names an agent not in the (already-loaded) project | `ValueError` naming the known agents | `cli._cmd_new` |
+| `commonadk import`'s `skills_dir` doesn't exist, or has no SKILL.md/`*.md` files | `ValueError` | `cli._cmd_import` |
+| `commonadk import`'s `common_dir` exists, is non-empty, and does not already load as a valid commonadk project | `ValueError` (embedding the `ValidationError` that made it fail to load) | `cli._cmd_import` |
+| `commonadk import`'s `common_dir` exists and is not a directory | `ValueError` | `cli._cmd_import` |
+| `commonadk import --entry` names neither an imported skill nor (in extend mode) an existing project agent | `ValueError` naming both lists | `cli._cmd_import` |
 | Any of the above surfacing through the CLI | printed to `stderr`, exit code `1` | `cli.main`'s `try/except` |
 
 ## Testing layout
 
-All 124 tests live under `tests/`, sharing two fixtures from
+All 207 tests live under `tests/`, sharing two fixtures from
 `tests/conftest.py`: `example_common_dir` (path to
 `examples/research-crew/common`, read-only) and `tmp_project` (a
 `tmp_path`-backed mutable copy of the same, for tests that deliberately
@@ -1142,7 +1237,7 @@ versions are shown below and are representative):
 | File | Covers |
 |---|---|
 | `test_models.py` | `resolve_model` (alias, literal passthrough, default fallback, unknown-alias `ValueError`, unknown-agent `KeyError`); `check_env` (missing required, satisfied, no requirements) |
-| `test_loader.py` | Full `load()` happy path (config/entry/agents), instructions + tools populated and callable, `ToolSpec` schema metadata, edges present, frontmatter stripped from `skill.md`, missing folder raises `ValidationError` |
+| `test_loader.py` | Full `load()` happy path (config/entry/agents), instructions + tools populated and callable, `ToolSpec` schema metadata, edges present, frontmatter stripped from `skill.md`, missing folder raises `ValidationError`; frontmatter reconciliation (feature 1): no-frontmatter compatibility contract, matching frontmatter `name` accepted, mismatched `name` errors, `description` fills in when agent-config.yaml has none, `description` conflict keeps agent-config.yaml's value and warns, an unrecognized frontmatter key warns (not errors), malformed frontmatter YAML errors naming the file |
 | `test_validation.py` | Each check individually — unknown tool name, untyped param, missing docstring, edge to unknown agent, bad edge type, folder/name mismatch, unknown model alias, entry mismatch, missing `config.yaml`, unknown YAML key, `runtime:` loads silently when set to an installed target / errors on an unknown target name / errors with an install hint when the target's SDK is missing / no check at all when unset — plus one test asserting multiple unrelated problems are *all* collected into one `ValidationError.errors` |
 | `test_mixed.py` | Mixed-target spawning end to end — compatibility with plain `build()` when no `runtime:` is set, a real two-runtime project (`examples/mixed-crew`), island computation (same-runtime connected agents share one native sub-graph), each v1 source-capable target's bridge actually attaches and is callable, the unsupported-source/non-root-source/crewai-manager-source error paths, multi-root island rejection, and env preflight spanning every runtime in one `OSError` |
 | `test_mermaid.py` | Node/edge rendering, entry-node marking, delegate vs. handoff arrow styles, `write_interaction_layer` output shape, and a drift guard (`test_example_interaction_layer_matches_current_graph`) asserting the committed `interaction-layer.md` still matches a fresh render of `interactions.yaml` |
@@ -1155,3 +1250,4 @@ versions are shown below and are representative):
 | `test_hypothesis.py` | `test_same_project_builds_on_every_installed_target`, parametrized over all six `target` strings — the v1 success criterion made executable: one `Project`, loaded once, built under whichever targets are actually installed (each case individually skipped via inline `pytest.importorskip`, not the whole file). Asserts each target's return value carries the build root's identity somewhere, under that SDK's own attribute shape (`.name` for google-adk/openai; `.system_prompt` for claude; `.manager_agent.role` for crewai; `._participant_names[0]` for autogen; `"coordinator" in .nodes` for langgraph) |
 | `test_cli.py` | In-process `cli.main(argv)` calls (no subprocess) asserting exit codes and captured stdout/stderr: `validate` (success summary incl. env set/not-set, broken project exits 1, missing folder exits 1), `render` (writes file, broken project exits 1), `run` (missing `requires.env` var, missing `ANTHROPIC_API_KEY` for `--target claude` naming that var in stderr, unknown target, unknown agent, broken project exits 1 before touching any SDK), `--version` |
 | `test_cli_new.py` | `commonadk new`: happy path (scaffolded files' shape, output passes `commonadk validate`, `interactions.yaml`/`interaction-layer.md` untouched with no `--from`), refuse-to-overwrite (an existing shipped agent and a just-scaffolded one, files left untouched either way), the `--from`/`--type` edge variant (edge appended, `interaction-layer.md` regenerated via the real renderer, default edge type is `delegate`, output passes `commonadk validate`), `--type` without `--from` rejected, unknown `--from` agent rejected (naming the known agents), broken project exits 1 before scaffolding anything, missing project folder exits 1 |
+| `test_import.py` | `commonadk import`, against small hand-authored fixtures under `tests/fixtures/` (not copied from any real SKILL.md library): both directory layouts (nested `<name>/SKILL.md`, flat `*.md`, including a no-frontmatter flat file's name-from-filename/no-description fallback), output passes `commonadk validate` and loads with the real `loader.load`, no edges invented (`graph.edges == []`), `--entry` honored and its alphabetically-first-imported default, name normalization (including the frontmatter `name:` line rewrite this forces when it disagrees with the normalized folder name, and collision deduping with a `-2` suffix), refuse-to-clobber (nonexistent dir creates it, empty existing dir is fine, non-empty non-project dir is refused untouched, a non-empty *valid* project is extended without ever overwriting an existing agent, `common_dir` being a file is rejected), missing/empty `skills_dir` rejected |

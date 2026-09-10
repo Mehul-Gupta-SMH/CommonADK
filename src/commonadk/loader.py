@@ -21,7 +21,7 @@ from pydantic import ValidationError as PydanticValidationError
 from .models import AgentConfig, AgentSpec, InteractionGraph, Project, ProjectConfig, ToolSpec
 from .validation import ValidationError, validate
 
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n?", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<yaml>.*?\n)---\s*\n?", re.DOTALL)
 
 
 def load(path: Union[str, Path]) -> Project:
@@ -45,6 +45,7 @@ def load(path: Union[str, Path]) -> Project:
     agent_instructions: dict[str, str] = {}
     agent_tools: dict[str, dict[str, ToolSpec]] = {}
     agent_folder_names: dict[str, str] = {}
+    skill_warnings: list[str] = []
 
     for folder in _discover_agent_folders(root):
         cfg = _load_agent_config(folder, errors)
@@ -58,7 +59,10 @@ def load(path: Union[str, Path]) -> Project:
             continue
         agent_folder_names[cfg.name] = folder.name
         agent_configs[cfg.name] = cfg
-        agent_instructions[cfg.name] = _load_skill(folder, cfg.name, errors)
+        # `_load_skill` may mutate `cfg.description` in place (frontmatter
+        # fallback -- see its docstring), so it must run before `cfg` is
+        # handed to `validate()` below.
+        agent_instructions[cfg.name] = _load_skill(folder, cfg, errors, skill_warnings)
         agent_tools[cfg.name] = _load_tools(folder, cfg.name, errors)
 
     val_errors, val_warnings = validate(
@@ -73,7 +77,7 @@ def load(path: Union[str, Path]) -> Project:
     if errors:
         raise ValidationError(errors)
 
-    for message in val_warnings:
+    for message in [*skill_warnings, *val_warnings]:
         _warnings.warn(message, stacklevel=2)
 
     assert project_config is not None  # guaranteed: no errors were raised
@@ -174,14 +178,105 @@ def _load_agent_config(folder: Path, errors: list[str]) -> Optional[AgentConfig]
         return None
 
 
-def _load_skill(folder: Path, agent_name: str, errors: list[str]) -> str:
+def _load_skill(
+    folder: Path,
+    cfg: AgentConfig,
+    errors: list[str],
+    warnings_out: list[str],
+) -> str:
+    """Read `skill.md` and return its body as agent instructions.
+
+    An optional YAML frontmatter block (`---`, YAML, `---`) is recognized
+    only when it's the very first thing in the file (`_FRONTMATTER_RE`,
+    anchored with `\\A`, applied once) -- a `---`-delimited block anywhere
+    else in the file is left untouched, treated as ordinary Markdown. A
+    `skill.md` with no frontmatter returns exactly `text.strip()`, same as
+    before this feature existed (back-compat contract, asserted directly by
+    `tests/test_loader.py::test_skill_md_without_frontmatter_is_unchanged`).
+
+    When frontmatter IS present, it's parsed and reconciled against `cfg`
+    (this agent's already-loaded `AgentConfig`) instead of being discarded --
+    see docs/file-contracts.md, "skill.md -- frontmatter", for the full
+    rules. In short:
+
+    - `agent-config.yaml` is always authoritative. Frontmatter supplies a
+      value only for a field `agent-config.yaml` left unset.
+    - `name`, if present, must agree with `cfg.name` (the same value the
+      folder-vs-name check in validation.py checks against the folder) --
+      disagreement is an error, in the same style as that check.
+    - `description`, if present and `cfg.description` is unset (`""`), is
+      adopted onto `cfg` in place (so every downstream consumer -- adapters
+      included -- sees one reconciled value, not two). If both are set and
+      differ, `cfg.description` wins and a warning is recorded.
+    - Any other frontmatter key is warned about, not errored. This is the
+      one deliberate asymmetry with every other `common/` YAML file (all of
+      which use `extra="forbid"`, see models.py): skill.md's frontmatter is
+      a surface other agent-SDK hosts (e.g. Claude Code, Codex, Cursor --
+      see Spotify's `portal-ai-plugins` for a real example) read and extend
+      too, so a key commonadk doesn't recognize may still be meaningful to
+      one of them and shouldn't block a commonadk load.
+    - Malformed frontmatter YAML, or frontmatter that doesn't parse to a
+      mapping, is an error naming the file.
+    """
+    agent_name = cfg.name
     path = folder / "skill.md"
     if not path.is_file():
         errors.append(f"{agent_name}/skill.md not found")
         return ""
+
     text = path.read_text()
-    text = _FRONTMATTER_RE.sub("", text, count=1)
-    return text.strip()
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return text.strip()
+
+    body = text[match.end() :].strip()
+
+    try:
+        frontmatter = yaml.safe_load(match.group("yaml"))
+    except yaml.YAMLError as e:
+        errors.append(f"{agent_name}/skill.md: invalid frontmatter YAML: {e}")
+        return body
+
+    if frontmatter is None:
+        frontmatter = {}
+    if not isinstance(frontmatter, dict):
+        errors.append(
+            f"{agent_name}/skill.md: frontmatter must be a YAML mapping "
+            f"(got {type(frontmatter).__name__})"
+        )
+        return body
+
+    fm_name = frontmatter.pop("name", None)
+    fm_description = frontmatter.pop("description", None)
+
+    if fm_name is not None and fm_name != agent_name:
+        errors.append(
+            f"{agent_name}/skill.md: frontmatter declares name '{fm_name}', "
+            f"which does not match agent-config.yaml's name '{agent_name}' "
+            f"(also the agent's folder name) -- skill.md frontmatter's "
+            f"`name` and agent-config.yaml's `name` must agree"
+        )
+
+    if fm_description:
+        if not cfg.description:
+            cfg.description = fm_description
+        elif cfg.description != fm_description:
+            warnings_out.append(
+                f"{agent_name}/skill.md: frontmatter `description` differs "
+                f"from agent-config.yaml's `description` -- agent-config.yaml "
+                f"wins ({cfg.description!r} kept over {fm_description!r})"
+            )
+
+    for key in sorted(frontmatter):
+        warnings_out.append(
+            f"{agent_name}/skill.md: unrecognized frontmatter key '{key}' -- "
+            f"ignored (skill.md frontmatter is a shared surface other "
+            f"agent-SDK hosts may add their own keys to; unlike commonadk's "
+            f"own YAML files, unknown frontmatter keys are warnings, not "
+            f"errors)"
+        )
+
+    return body
 
 
 def _load_tools(folder: Path, agent_name: str, errors: list[str]) -> dict[str, ToolSpec]:

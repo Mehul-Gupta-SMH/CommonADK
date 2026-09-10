@@ -315,13 +315,48 @@ system prompt" differs, but all six read this same string: `instruction=`
 
 **Frontmatter rule**: an optional YAML frontmatter block — `---`, then
 YAML, then `---` — is recognized **only when it is the very first thing in
-the file** (`_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n?",
+the file** (`_FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<yaml>.*?\n)---\s*\n?",
 re.DOTALL)`, anchored with `\A`, applied once). If present, it is stripped
-before the text becomes instructions; its content is not parsed into
-anything today — it's reserved for future metadata (`plan.md`,
-"`skill.md`"). A `---`-delimited block anywhere other than the very start
-of the file is left untouched (i.e. it's treated as regular Markdown
-content, not frontmatter).
+from the text that becomes instructions. A `---`-delimited block anywhere
+other than the very start of the file is left untouched (i.e. it's treated
+as regular Markdown content, not frontmatter). A `skill.md` with **no**
+frontmatter behaves exactly as it always has — this is a strict
+compatibility contract, asserted directly by
+`test_skill_md_without_frontmatter_is_unchanged` (`tests/test_loader.py`).
+
+**Frontmatter semantics and precedence (interoperability with other
+SKILL.md-reading hosts).** commonadk's `skill.md` is close to the same
+artifact several other agent-SDK ecosystems ship as `SKILL.md` with YAML
+frontmatter carrying `name`/`description` (see e.g. Spotify's
+`spotify/portal-ai-plugins`, one canonical `skills/<name>/SKILL.md` per
+skill). Rather than discard that frontmatter, `loader._load_skill` parses
+and reconciles it against the agent's already-loaded `AgentConfig` (from
+`agent-config.yaml`):
+
+- **`agent-config.yaml` is always authoritative.** Frontmatter supplies a
+  value only for a field `agent-config.yaml` left unset.
+- **`name`**, if present in frontmatter, must equal the agent's real name
+  (`AgentConfig.name`, which — per `validation._check_folder_names` above
+  — already has to equal the containing folder's name too). A mismatch is
+  a load-time error, in the same style as that folder-vs-name check.
+- **`description`**, if present in frontmatter and `agent-config.yaml`
+  left its own `description` unset (`""`, the field's default), is adopted
+  onto the agent's config in place — so every downstream consumer
+  (`commonadk validate`, every adapter) sees one reconciled value, not two.
+  If both are set and they differ, **`agent-config.yaml` wins** and a
+  warning is recorded naming both values.
+- **Any other frontmatter key is a warning, not an error** — the one
+  deliberate asymmetry with every other `common/` YAML file (`config.yaml`,
+  `agent-config.yaml`, `interactions.yaml`, all `extra="forbid"`, see
+  above). skill.md's frontmatter is a *shared* surface: other agent-SDK
+  hosts (Claude Code, Codex, Cursor, ...) read the same file and may
+  legitimately carry their own keys commonadk doesn't know about — an
+  unrecognized key there isn't necessarily a mistake the way an
+  unrecognized key in a commonadk-only file would be, so it can't block a
+  commonadk load the same way.
+- **Malformed frontmatter YAML** (fails to parse), or frontmatter that
+  parses to something other than a YAML mapping, is a load-time error
+  naming the file.
 
 **Example** (`.../coordinator/skill.md`):
 
@@ -338,7 +373,17 @@ user, break it into a concrete research question and delegate it to the
 ```
 
 After loading, `AgentSpec.instructions` for `coordinator` begins with
-`# Coordinator` — the `role: orchestrator` frontmatter is gone.
+`# Coordinator` — the frontmatter is gone from the instructions text either
+way. Here `role` isn't `name` or `description`, so it's recorded as a
+warning (`role/skill.md: unrecognized frontmatter key 'role' -- ignored`)
+and otherwise has no effect — this is the frontmatter the shipped
+research-crew example actually ships, unchanged by this feature.
+
+**`commonadk import`** (see the README and `docs/LLD.md`, `cli.py`) is the
+other half of this interoperability story: it turns a directory of
+SKILL.md files (either layout — Spotify's nested `<name>/SKILL.md`, or a
+flat `*.md` directory) into a conforming `common/` project, one agent
+folder per skill, `skill.md` copied verbatim (frontmatter included).
 
 ## `common/<agent>/tools.py`
 
