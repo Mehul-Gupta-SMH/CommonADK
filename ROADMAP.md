@@ -18,7 +18,7 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 | #7 | **Released on PyPI** — `pip install commonadk` (v0.0.1), published by the tag-triggered workflow |
 | #9 | Mixed-target spawning foundation: `runtime:` honored in-process, native per-runtime islands, cross-runtime edges bridged by plain callables ([design](docs/mixed-target-design.md)) |
 | #12 | Broader `model_params` per adapter (per-provider maps where SDKs need them) and the `commonadk new <agent>` scaffolding command |
-| [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) | Verified live runs — one real turn per target against `examples/live-smoke/common` on `claude-haiku-4-5`: 5 of 6 targets (`google-adk`, `openai`, `claude`, `crewai`, `langgraph`) confirmed working end to end; `autogen` blocked on a verified upstream incompatibility (`autogen-ext` sending `temperature` into `anthropic` 1.x's `messages.create()`, which no longer accepts it), fix tracked separately ([docs/demo-runs.md](docs/demo-runs.md#live-runs)) |
+| [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) | Verified live runs — **all 6 targets** execute one real turn from the same unmodified agent definition against `examples/live-smoke/common` on `claude-haiku-4-5`, each invoking the tool and returning its answer ([run #5](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34541706890), captured in [docs/demo-runs.md](docs/demo-runs.md#live-runs)). The first run exposed two real defects, both fixed: an `autogen-ext`/`anthropic` 1.x incompatibility, and the openai runner reporting unmeasured usage as a confident zero |
 
 ## Next up
 
