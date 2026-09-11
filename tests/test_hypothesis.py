@@ -76,20 +76,31 @@ def test_same_project_builds_on_every_installed_target(
     # -- see claude_agent.py's module docstring, "WHAT build() RETURNS";
     # CrewAI returns a `Crew` whose build-root agent is `.manager_agent`,
     # not a member of `.agents` -- see crewai_adapter.py's module
-    # docstring, "Manager-or-solo-member decision"; AutoGen returns a
-    # `Swarm` team here -- coordinator has an outgoing edge -- whose first
-    # participant is the build root, see autogen_adapter.py's module
-    # docstring, "WHAT build() RETURNS"; LangGraph returns a compiled
-    # multi-agent `StateGraph` here -- coordinator has an outgoing edge --
-    # whose nodes are keyed by agent name, see langgraph_adapter.py's module
-    # docstring, "WHAT build() RETURNS").
+    # docstring, "Manager-or-solo-member decision".
+    #
+    # Since issue #10 (delegate/handoff distinction): coordinator's only
+    # edge (-> researcher) is `delegate`, not `handoff` -- on AutoGen and
+    # LangGraph (the two targets where "build root has an outgoing edge"
+    # used to mean "wrap in a team/multi-node graph" regardless of edge
+    # type), a build root with ONLY delegate edges now returns its own
+    # bare, directly-runnable object instead, with researcher reached
+    # through a delegate tool -- see each adapter's module docstring,
+    # "WHAT build() RETURNS", now scoped to *handoff* edges specifically.
     if target == "claude":
         assert agent.system_prompt.strip() != ""
     elif target == "crewai":
         assert agent.manager_agent.role == "coordinator"
     elif target == "autogen":
-        assert agent._participant_names[0] == "coordinator"
+        from autogen_agentchat.agents import AssistantAgent
+
+        assert isinstance(agent, AssistantAgent)  # bare agent, not a Swarm -- see above
+        assert agent.name == "coordinator"
+        assert "delegate_to_researcher" in {t.name for t in agent._tools}
     elif target == "langgraph":
-        assert "coordinator" in agent.nodes
+        from langgraph.graph.state import CompiledStateGraph
+
+        assert isinstance(agent, CompiledStateGraph)  # bare react agent, not a multi-node graph
+        assert "coordinator" not in agent.nodes
+        assert "tools" in agent.nodes  # its own delegate_to_researcher tool is wired in
     else:
         assert agent.name == "coordinator"

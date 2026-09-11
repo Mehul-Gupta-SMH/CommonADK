@@ -119,7 +119,17 @@ def test_build_mixed_matches_build_when_no_runtime_set(example_common_dir, tavil
 
     native = mixed.entry_native
     assert native.name == direct.name == "coordinator"
-    assert [t.__name__ for t in native.tools] == [t.__name__ for t in direct.tools]
+    # A plain callable's identifying name is `__name__`; an SDK tool object
+    # (e.g. `google.adk.tools.AgentTool`, wired in for `delegate` edges
+    # since issue #10) has no `__name__` at all but does have `.name` (see
+    # google_adk.py's module docstring, "Edge semantics") -- this helper
+    # reads whichever applies so this comparison covers both tool shapes.
+    def _tool_identity(t: object) -> str:
+        return getattr(t, "__name__", None) or getattr(t, "name")
+
+    assert [_tool_identity(t) for t in native.tools] == [
+        _tool_identity(t) for t in direct.tools
+    ]
     assert [a.name for a in native.sub_agents] == [a.name for a in direct.sub_agents]
 
 

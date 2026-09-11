@@ -24,20 +24,26 @@ only take effect inside a `Swarm` (or another team); a bare `AssistantAgent.
 run()` just answers once and never consults `.handoffs` at all.
 
 So this adapter builds every reachable agent once (see "Edge mapping"), then
-picks the return shape based on whether the build root actually has
-somewhere to hand off to:
+picks the return shape based on whether the build root actually has a
+`handoff` edge to route -- NOT "any outgoing edge" (a build root with only
+`delegate` edges, e.g. coordinator in the shipped example, needs no `Swarm`
+at all: its delegate targets are wired directly into its own `tools` via
+`AgentTool`, so the bare agent is already fully self-contained and
+runnable -- see "Edge mapping" above):
 
-- The build root has NO outgoing edges (a leaf, e.g. `writer` in the shipped
-  example): there is nothing to route to, so this adapter returns the bare
-  `AssistantAgent` -- the simplest, most directly runnable object for that
-  case. Usage: `result = await agent.run(task="...")`.
-- The build root HAS at least one outgoing edge: this adapter returns a
-  ready-to-run `autogen_agentchat.teams.Swarm` whose `participants` are
-  every reachable agent, build root first (`BaseAdapter._reachable_agents`
-  already returns `agent_name` at index 0, which is also exactly the
-  property `Swarm` requires: verified via `Swarm.__init__` -- the first
-  participant becomes the initial speaker). Usage:
-  `result = await team.run(task="...")`.
+- The build root has NO outgoing HANDOFF edges (either a true leaf with no
+  edges at all, e.g. `writer` in the shipped example, OR a root whose edges
+  are all `delegate`, e.g. `coordinator`): there is nothing for a `Swarm` to
+  route, so this adapter returns the bare `AssistantAgent` -- the simplest,
+  most directly runnable object for that case, its own `AgentTool`-wrapped
+  delegate calls included. Usage: `result = await agent.run(task="...")`.
+- The build root HAS at least one outgoing HANDOFF edge: this adapter
+  returns a ready-to-run `autogen_agentchat.teams.Swarm` whose
+  `participants` are every agent reachable via `handoff` edges ONLY, build
+  root first (`BaseAdapter._reachable_via(..., {"handoff"})` returns
+  `agent_name` at index 0, which is also exactly the property `Swarm`
+  requires: verified via `Swarm.__init__` -- the first participant becomes
+  the initial speaker). Usage: `result = await team.run(task="...")`.
 
 Usage (mirroring cli.py's `_run_autogen`):
 
@@ -75,10 +81,87 @@ conversation should not rely on the `Swarm` this adapter returns for that;
 building one directly from `AssistantAgent`s (this adapter's own approach,
 above) with an explicit `termination_condition` is the escape hatch.
 
-Edge mapping (v1 intersection decision, plan.md "Edge semantics v1", same
-call as openai_agents.py): both `delegate` and `handoff` edges map to
-AutoGen's one handoff mechanism -- `AssistantAgent(handoffs=[...])`. commonadk
-does not yet distinguish them for this target either.
+Edge mapping -- THIS ADAPTER HONORS THE DELEGATE/HANDOFF DISTINCTION
+(GitHub issue #10's first checkbox), not the v1 collapsed mapping. The
+issue only asked this adapter to be "investigated" (unlike LangGraph/Google
+ADK/OpenAI Agents, named explicitly) -- investigation found a second, real
+mechanism installed alongside `AssistantAgent(handoffs=[...])`:
+`autogen_agentchat.tools.AgentTool` (autogen-agentchat 0.7.5, verified via
+`inspect.getsource`). Its own docstring: "Tool that can be used to run a
+task using an agent. The tool returns the result of the task execution... as
+a TaskResult object" -- wraps a `BaseChatAgent`, is added to another agent's
+own `tools=[...]` list like any other tool, and runs the wrapped agent to
+completion and returns its result INTO THE CALLING AGENT'S OWN turn. That is
+exactly this project's `delegate` (a sub-call that returns), matching
+`AssistantAgent(handoffs=[...])`'s `Swarm`-routed conversation TRANSFER
+(never returns) being exactly `handoff`. So:
+
+- `handoff` edges map to `AssistantAgent(handoffs=[...])` (unchanged) --
+  target names as plain strings, resolved by `Swarm` at run time.
+- `delegate` edges map to a tool wrapping the destination's OWN independent
+  build, appended to the source's `tools` list (new) -- see "Recursive
+  construction, and the AgentTool/TeamTool split" below for why it is
+  sometimes `AgentTool` and sometimes `TeamTool`.
+
+Recursive construction, and the AgentTool/TeamTool split: a `delegate`
+destination is built by recursing into THIS ADAPTER'S OWN `build()` (not a
+separate code path) -- exactly like Google ADK's and LangGraph's adapters
+after this same feature, and for the same reason: a delegate destination
+can itself have further outgoing edges of either type, and `build()`
+already knows how to decide "bare agent, or does this need a `Swarm`" for
+any agent, root or not. That recursive `build()` call returns one of two
+shapes (see "WHAT build() RETURNS" below, re-scoped to handoff edges only):
+
+- A bare `AssistantAgent` (destination has no outgoing HANDOFF edges of its
+  own) -- wrapped in `autogen_agentchat.tools.AgentTool(agent=<that
+  AssistantAgent>)`. Verified via `inspect.getsource`: `AgentTool` "wraps
+  an agent" so it "allows an agent to be called as a tool"; "the agent's
+  output is returned as the tool's result" -- a sub-call that returns,
+  exactly `delegate`.
+- A `Swarm` team (destination itself has outgoing handoff edges, so its own
+  build wires a whole routable sub-team) -- wrapped in `autogen_agentchat.
+  tools.TeamTool(team=<that Swarm>, name=f"delegate_to_{dest}",
+  description=...)` instead, since `AgentTool.__init__` only accepts a
+  `BaseChatAgent`, not a `Team`/`BaseGroupChat` (verified via `inspect.
+  signature`) -- `TeamTool` is the SDK's own team-shaped counterpart,
+  same "runs to completion, returns the result, caller's turn continues"
+  contract, just for a multi-agent sub-team instead of a single agent.
+  Delegating to a destination that itself needs to internally hand off
+  is exactly the case a plain `AgentTool` cannot represent, and `TeamTool`
+  exists in this SDK for precisely that reason.
+
+`AgentTool` derives its exposed tool name from `agent.name` itself
+(verified via `inspect.getsource` of `TaskRunnerTool.__init__`, which
+`AgentTool` calls with `agent.name`/`agent.description` and no override
+parameter at all) -- so an `AgentTool`-wrapped delegate tool is named
+exactly the destination's agent name (e.g. `"researcher"`), while a
+`TeamTool`-wrapped one is named `f"delegate_to_{dest}"` (this adapter's own
+explicit choice, since `TeamTool` requires a `name` argument). This is a
+real, SDK-imposed naming asymmetry between the two branches, not an
+oversight -- documented here rather than worked around, matching this
+project's restraint around every other SDK-owned quirk in this file (e.g.
+the OpenAI-vs-Anthropic `model_params` map split above).
+
+Recursion and cycles: since a `delegate` edge now recurses into a fresh,
+independent `build()` call for its destination (rather than referencing an
+already-built object the way `handoffs` name-strings do), a cycle closed
+purely by `delegate` edges (or a mix of the two types) is an unbounded-
+recursion hazard at construction time, exactly like Google ADK's and
+LangGraph's adapters after this same feature -- `build()` therefore threads
+one `_delegate_ancestors` chain through this recursion and raises a clear
+`ValueError` before ever recursing past a repeated name, rather than
+overflowing the stack. A cycle closed ENTIRELY by `handoff` edges is still
+no hazard at all, exactly as before this feature (see "KEY PROPERTY"
+above) -- `Swarm` resolves those by name at run time, with no construction-
+time recursion involved.
+
+WHAT build() RETURNS is now scoped to HANDOFF edges specifically, not "any
+outgoing edge": a build root with only `delegate` edges (e.g.
+`coordinator` in the shipped example) needs no `Swarm` at all -- its
+delegate targets are wired directly into its own `tools` via
+`AgentTool`/`TeamTool`, so the bare `AssistantAgent` is already fully
+self-contained and runnable. See the updated "WHAT build() RETURNS" section
+above for the precise decision.
 
 KEY PROPERTY, investigated not assumed -- handoff targets are plain NAME
 STRINGS, not object references: `AssistantAgent.__init__` accepts
@@ -286,6 +369,7 @@ from typing import TYPE_CHECKING, Any
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.teams import Swarm
+from autogen_agentchat.tools import AgentTool, TeamTool
 from autogen_core.models import ModelFamily, ModelInfo
 from autogen_ext.models.anthropic import AnthropicChatCompletionClient
 from autogen_ext.models.openai import OpenAIChatCompletionClient
@@ -418,36 +502,122 @@ def _check_anthropic_temperature_compat() -> None:
 class AutoGenAdapter(BaseAdapter):
     target = "autogen"
 
-    def build(self, project: "Project", agent_name: str) -> Any:
+    def build(
+        self,
+        project: "Project",
+        agent_name: str,
+        _delegate_ancestors: tuple[str, ...] = (),
+    ) -> Any:
+        """Build `agent_name`. `_delegate_ancestors` is an internal-only
+        parameter (not part of `BaseAdapter`'s public contract) used when
+        this method recurses into a `delegate` destination's own build --
+        see module docstring, "Recursion and cycles".
+        """
+        if agent_name in _delegate_ancestors:
+            chain = " -> ".join((*_delegate_ancestors, agent_name))
+            raise ValueError(
+                f"commonadk: cycle detected in delegate edges reachable "
+                f"from the build root ({chain}). Each `delegate` edge "
+                f"recurses into an independent build of its destination "
+                f"(see autogen_adapter.py's module docstring, 'Recursion "
+                f"and cycles'), which would recurse forever around this "
+                f"cycle rather than terminating."
+            )
         self._check_env(project, agent_name)
 
-        reachable = self._reachable_agents(project, agent_name)  # agent_name first
+        # Only handoff-reachable agents join this build's Swarm/participant
+        # set -- a `delegate`-only destination is invoked as a standalone
+        # tool call (AgentTool/TeamTool, below) and never receives
+        # conversation history or becomes a Swarm speaker (see module
+        # docstring, "WHAT build() RETURNS").
+        handoff_reachable = self._reachable_via(project, agent_name, {"handoff"})  # root first
 
-        agents: dict[str, AssistantAgent] = {}
-        for name in reachable:
-            spec = project.agents[name]
-            handoff_targets = [
-                edge.to for edge in project.graph.edges if edge.from_ == name
-            ]
-            agents[name] = AssistantAgent(
-                name=spec.name,
-                model_client=self._client_for(project, spec),
-                tools=[t.func for t in spec.tools],
-                handoffs=handoff_targets,
-                system_message=spec.instructions,
-                description=spec.config.description,
-            )
+        agents: dict[str, AssistantAgent] = {
+            name: self._build_assistant_agent(project, name, _delegate_ancestors)
+            for name in handoff_reachable
+        }
 
-        has_outgoing = any(edge.from_ == agent_name for edge in project.graph.edges)
-        if not has_outgoing:
+        has_outgoing_handoff = any(
+            edge.from_ == agent_name and edge.type == "handoff"
+            for edge in project.graph.edges
+        )
+        if not has_outgoing_handoff:
             # Nothing for the build root to hand off to -- handoffs only do
-            # anything inside a team, so the bare agent is the honest,
-            # directly runnable object here (see module docstring, "WHAT
-            # build() RETURNS").
+            # anything inside a team, so the bare agent (its own delegate
+            # tools already wired in by _build_assistant_agent) is the
+            # honest, directly runnable object here.
             return agents[agent_name]
 
-        participants = [agents[name] for name in reachable]  # root first
-        return Swarm(participants, max_turns=len(reachable))
+        participants = [agents[name] for name in handoff_reachable]  # root first
+        return Swarm(participants, max_turns=len(handoff_reachable))
+
+    # -- per-agent construction -------------------------------------------
+
+    def _build_assistant_agent(
+        self,
+        project: "Project",
+        name: str,
+        ancestors: tuple[str, ...],
+    ) -> AssistantAgent:
+        """Build one `AssistantAgent`, its `handoffs` list set from `name`'s
+        `handoff` edges and its own `delegate` edges wired in as
+        AgentTool/TeamTool-wrapped tools (see module docstring, "Edge
+        mapping" and "Recursive construction").
+        """
+        spec = project.agents[name]
+        handoff_targets = [
+            edge.to
+            for edge in project.graph.edges
+            if edge.from_ == name and edge.type == "handoff"
+        ]
+        agent = AssistantAgent(
+            name=spec.name,
+            model_client=self._client_for(project, spec),
+            tools=[t.func for t in spec.tools],
+            handoffs=handoff_targets,
+            system_message=spec.instructions,
+            description=spec.config.description,
+        )
+
+        delegate_edges = [
+            edge for edge in project.graph.edges if edge.from_ == name and edge.type == "delegate"
+        ]
+        if delegate_edges:
+            child_ancestors = (*ancestors, name)
+            delegate_tools = [
+                self._make_delegate_tool(project, edge.to, child_ancestors)
+                for edge in delegate_edges
+            ]
+            # `AssistantAgent` exposes no public `tools` attribute/setter at
+            # all (verified via `inspect.getsource`/`dir`: only the private
+            # `self._tools: List[BaseTool[Any, Any]]`, appended to at
+            # construction and read directly wherever the agent builds its
+            # LLM tool schema) -- so appending post-construction, the same
+            # way `AssistantAgent.__init__` itself populates it, is the only
+            # way to add a tool after the fact; there is no cleaner public
+            # seam to prefer here.
+            agent._tools.extend(delegate_tools)
+        return agent
+
+    def _make_delegate_tool(
+        self, project: "Project", dest_name: str, ancestors: tuple[str, ...]
+    ) -> Any:
+        """Build `dest_name` via a fresh, independent `build()` call and
+        wrap the result as a tool -- `AgentTool` for a bare `AssistantAgent`,
+        `TeamTool` for a `Swarm` (see module docstring, "Recursive
+        construction, and the AgentTool/TeamTool split").
+        """
+        built = self.build(project, dest_name, _delegate_ancestors=ancestors)
+        if isinstance(built, Swarm):
+            return TeamTool(
+                team=built,
+                name=f"delegate_to_{dest_name}",
+                description=(
+                    f"Delegate a task to the '{dest_name}' team and "
+                    f"receive its result back into this conversation."
+                ),
+            )
+        return AgentTool(agent=built)
 
     # -- model routing ------------------------------------------------------
 

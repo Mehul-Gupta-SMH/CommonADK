@@ -73,15 +73,26 @@ def test_coordinator_build_happy_path_on_example(example_common_dir, tavily_env)
     researcher -handoff-> writer -- must build end-to-end unmodified on the
     OpenAI Agents target, exactly as it does on Google ADK (test_adapter_
     google.py). This is the M3 hypothesis test's entry point.
+
+    Since issue #10 (delegate/handoff distinction), coordinator's edge to
+    researcher is a `delegate` -- so researcher must appear as a
+    `delegate_to_researcher` TOOL on coordinator, not in coordinator's
+    `handoffs` list (which must be empty: coordinator has no `handoff`
+    edges of its own). researcher -> writer is a `handoff`, so writer must
+    still appear in researcher.handoffs, exactly as before.
     """
     project = commonadk.load(example_common_dir)
     agent = project.build("coordinator", target="openai")
 
     assert agent.name == "coordinator"
     assert agent.instructions.strip() != ""
-    assert [a.name for a in agent.handoffs] == ["researcher"]
+    assert agent.handoffs == []  # coordinator's only edge is delegate, not handoff
+    tool_names = {t.name for t in agent.tools}
+    assert "delegate_to_researcher" in tool_names
 
-    researcher = agent.handoffs[0]
+    delegate_tool = next(t for t in agent.tools if t.name == "delegate_to_researcher")
+    researcher = delegate_tool._agent_instance
+    assert researcher.name == "researcher"
     assert researcher.instructions.strip() != ""
     assert [a.name for a in researcher.handoffs] == ["writer"]
 
@@ -93,14 +104,21 @@ def test_coordinator_build_happy_path_on_example(example_common_dir, tavily_env)
 def test_multi_parent_graph_builds_with_shared_instance(multi_parent_project):
     """KEY DIFFERENCE from Google ADK: a multi-parent graph must build
     successfully here, and both parents must reference the *same* `writer`
-    `Agent` instance (identity, not just equal names) -- `handoffs` is a
-    list of references, not a tree of owned children.
+    `Agent` instance (identity, not just equal names) -- the memoized
+    `dict[str, Agent]` this adapter builds from is shared regardless of
+    which edge type reaches a given name. `multi_parent_project`'s added
+    edge is a `delegate` (coordinator -> writer), so both of coordinator's
+    edges are delegate here -- `coordinator.handoffs` is empty and both
+    destinations are reached through delegate tools instead (see module
+    docstring, "Edge semantics").
     """
     coordinator = multi_parent_project.build("coordinator", target="openai")
+    assert coordinator.handoffs == []
 
-    researcher = next(a for a in coordinator.handoffs if a.name == "researcher")
-    writer_via_coordinator = next(a for a in coordinator.handoffs if a.name == "writer")
-    writer_via_researcher = researcher.handoffs[0]
+    tool_by_name = {t.name: t for t in coordinator.tools if hasattr(t, "_agent_instance")}
+    researcher = tool_by_name["delegate_to_researcher"]._agent_instance
+    writer_via_coordinator = tool_by_name["delegate_to_writer"]._agent_instance
+    writer_via_researcher = researcher.handoffs[0]  # researcher -> writer is still a handoff
 
     assert writer_via_researcher.name == "writer"
     assert writer_via_coordinator is writer_via_researcher
@@ -110,15 +128,72 @@ def test_cyclic_graph_builds_with_wired_handoff_references(cyclic_project):
     """KEY DIFFERENCE from Google ADK: a cyclic graph must build
     successfully here (see cyclic_project fixture and openai_agents.py's
     module docstring) -- writer's handoffs wire back around to the same
-    coordinator instance the build started from.
+    coordinator instance the build started from. coordinator -> researcher
+    is a delegate edge, so it is reached through a delegate tool, not
+    `coordinator.handoffs` (which stays empty).
     """
     coordinator = cyclic_project.build("coordinator", target="openai")
+    assert coordinator.handoffs == []
 
-    researcher = coordinator.handoffs[0]
+    delegate_tool = next(t for t in coordinator.tools if t.name == "delegate_to_researcher")
+    researcher = delegate_tool._agent_instance
     writer = researcher.handoffs[0]
 
     assert [a.name for a in writer.handoffs] == ["coordinator"]
     assert writer.handoffs[0] is coordinator
+
+
+# ---------------------------------------------------------------------------
+# delegate/handoff distinction (issue #10, first checkbox)
+# ---------------------------------------------------------------------------
+
+
+def test_delegate_edge_becomes_agent_as_tool_not_handoff(tmp_project, tavily_env):
+    """A `delegate` edge from coordinator -> researcher must produce a
+    `delegate_to_researcher` FunctionTool wrapping researcher via
+    `Agent.as_tool()` -- NOT an entry in `coordinator.handoffs`.
+    """
+    project = commonadk.load(tmp_project)  # unmodified: coordinator -delegate-> researcher
+    coordinator = project.build("coordinator", target="openai")
+
+    assert coordinator.handoffs == []
+    tool_names = {t.name for t in coordinator.tools}
+    assert "delegate_to_researcher" in tool_names
+    assert not any(name.startswith("transfer_to_") for name in tool_names)
+
+
+def test_handoff_edge_stays_in_handoffs_not_tools(tmp_project, tavily_env):
+    """A `handoff` edge from researcher -> writer must produce an entry in
+    `researcher.handoffs` and must NOT also appear as a delegate tool.
+    """
+    project = commonadk.load(tmp_project)  # unmodified: researcher -handoff-> writer
+    researcher = project.build("researcher", target="openai")
+
+    assert [a.name for a in researcher.handoffs] == ["writer"]
+    tool_names = {t.name for t in researcher.tools}
+    assert "delegate_to_writer" not in tool_names
+
+
+def test_mixed_edges_from_same_source_split_correctly(tmp_project, tavily_env):
+    """A source with one delegate edge and one handoff edge (to different
+    destinations) must split them correctly: one becomes a tool, the other
+    a handoff -- neither mechanism swallows the other.
+    """
+    interactions_path = tmp_project / "interactions.yaml"
+    data = yaml.safe_load(interactions_path.read_text())
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "delegate"},
+        {"from": "coordinator", "to": "writer", "type": "handoff"},
+    ]
+    interactions_path.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    coordinator = project.build("coordinator", target="openai")
+
+    assert [a.name for a in coordinator.handoffs] == ["writer"]
+    tool_names = {t.name for t in coordinator.tools}
+    assert "delegate_to_researcher" in tool_names
+    assert "delegate_to_writer" not in tool_names
 
 
 # ---------------------------------------------------------------------------

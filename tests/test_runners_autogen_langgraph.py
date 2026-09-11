@@ -135,6 +135,19 @@ def test_autogen_runner_normalizes_tool_call_and_handoff(
 
     monkeypatch.setattr(Swarm, "run_stream", fake_run_stream)
 
+    # This test drives a `Swarm`, so the project must actually build one.
+    # Since issue #10 the adapter only wraps the build root in a `Swarm`
+    # when it has an outgoing *handoff* edge; the shipped example's
+    # coordinator edge is `delegate`, which now builds a bare
+    # `AssistantAgent` instead. Patching `Swarm.run_stream` would then
+    # silently miss, and the runner would call the real AssistantAgent --
+    # i.e. a live API request from an offline test. Flip the edge so the
+    # build shape matches what this test is actually about.
+    interactions = tmp_project / "interactions.yaml"
+    interactions.write_text(
+        interactions.read_text().replace("type: delegate", "type: handoff")
+    )
+
     project = load(str(tmp_project))
     runner = AutoGenRunner()
     trace = runner.run_sync(project, "coordinator", "research EV adoption")

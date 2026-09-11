@@ -420,11 +420,14 @@ also harmless, just introspected and then unused).
 Type hints and the docstring are exactly what every adapter turns into
 that SDK's native tool schema. Three adapters pass the bare function
 straight through and let the SDK introspect it itself: Google ADK
-(`tools=[tool.func for tool in spec.tools]`), AutoGen
-(`AssistantAgent(tools=[t.func for t in spec.tools])`, wrapped internally
-with `autogen_core.tools.FunctionTool`), and LangGraph
-(`create_agent(..., tools=[t.func for t in spec.tools] + handoff_tools)`,
-wrapped internally into a `StructuredTool`). Three wrap it with the SDK's
+(`tools=[tool.func for tool in spec.tools]`, plus any `AgentTool`-wrapped
+delegate edges), AutoGen (`AssistantAgent(tools=[t.func for t in
+spec.tools])`, wrapped internally with `autogen_core.tools.FunctionTool`,
+plus any `AgentTool`/`TeamTool`-wrapped delegate edges), and LangGraph
+(`create_agent(..., tools=[t.func for t in spec.tools] + handoff_tools +
+delegate_tools)`, wrapped internally into a `StructuredTool` -- see
+"Delegate vs. handoff" below for what `handoff_tools`/`delegate_tools` are).
+Three wrap it with the SDK's
 own decorator/builder first: OpenAI Agents (`agents.function_tool(tool.func)`),
 CrewAI (`crewai.tools.tool(tool.func)`), and the Claude Agent SDK, which
 builds a JSON Schema from `ToolSpec.parameters` itself and wraps the
@@ -496,7 +499,7 @@ Each edge (`InteractionEdge`):
 |---|---|---|---|
 | `from` | `str` | yes | source agent name (Python attribute `from_` — `from` is a reserved word, so the model declares `from_: str = Field(alias="from")` with `populate_by_name=True`) |
 | `to` | `str` | yes | target agent name |
-| `type` | `"delegate" \| "handoff"` | yes | the only two edge types v1 supports (`Literal["delegate", "handoff"]` — any other value is a Pydantic parse error, reported as a `ValidationError` at `interactions.yaml` load) |
+| `type` | `"delegate" \| "handoff"` | yes | the only two edge types v1 supports (`Literal["delegate", "handoff"]` — any other value is a Pydantic parse error, reported as a `ValidationError` at `interactions.yaml` load). `delegate` = a sub-call: the caller invokes the callee and control returns with its result. `handoff` = a baton pass: control transfers to the callee and does not come back. Four of the six adapters build genuinely different structures for the two (see "Semantics, per target" below); the other two keep both collapsed onto one mechanism, documented in their own module docstrings. |
 
 **Validation**: both `from` and `to` on every edge must name an agent that
 actually exists (a real folder with a matching `agent-config.yaml`) —
@@ -505,22 +508,33 @@ file's) must also name a real agent, and if both files set `entry` they
 must agree — `validation._check_entry`.
 
 **Semantics, per target** (full detail:
-[`HLD.md`](HLD.md#comparing-the-six-targets)): both edge types map to the
-*one* routing mechanism each of the six SDKs exposes today, so v1 does not
-yet build different structures for `delegate` vs. `handoff`. The
-distinction is preserved in the schema for a future adapter/SDK capability
-to honor. How faithfully an edge's *target* survives translation is a
-spectrum, not uniform: LangGraph represents it precisely (one
-individually-named handoff tool per edge); OpenAI Agents and AutoGen
-represent it as a per-agent reference (a live object, or a name string)
-with no restriction on multi-parent graphs or cycles; the Claude Agent SDK
-registers every reachable agent in one flat registry and gates delegation
-access per-agent by outgoing edge; Google ADK's `sub_agents` are a strict
-**tree** — the subgraph reachable from whichever agent you `build()` must
-itself be a tree, no agent reachable from two parents, no cycles, or
-`GoogleADKAdapter` raises before constructing anything; CrewAI's
-delegation is crew-wide, so an edge's *target* isn't representable at all
-there — only *whether* an agent can delegate is.
+[`HLD.md`](HLD.md#comparing-the-six-targets)): two independent questions,
+answered separately per target. (1) Edge *target* fidelity — how precisely
+an edge's *destination* survives translation — is a spectrum, not uniform:
+LangGraph represents it precisely (one individually-named tool per edge);
+OpenAI Agents and AutoGen represent it as a per-agent reference (a live
+object, or a name string) with no restriction on multi-parent graphs or
+cycles; the Claude Agent SDK registers every reachable agent in one flat
+registry and gates delegation access per-agent by outgoing edge; Google
+ADK's `sub_agents` (for `handoff` edges) are a strict **tree** — the
+handoff-reachable subgraph from whichever agent you `build()` must itself
+be a tree, no agent reachable from two `handoff` parents, no cycle closed
+by `handoff` edges, or `GoogleADKAdapter` raises before constructing
+anything; CrewAI's delegation is crew-wide, so an edge's *target* isn't
+representable at all there — only *whether* an agent can delegate is. (2)
+Edge *type* fidelity — whether `delegate` and `handoff` actually build
+different structures — is a separate, orthogonal axis (issue #10): four
+targets (LangGraph, Google ADK, OpenAI Agents, AutoGen) honor it for real,
+each mapping `delegate` to a call-and-return mechanism (a tool that
+invokes the destination and gets a result back) and `handoff` to a
+transfer-and-never-return mechanism (LangGraph's `Command(goto=...,
+graph=Command.PARENT)`, ADK's `sub_agents`/`transfer_to_agent`, OpenAI
+Agents' `handoffs`, AutoGen's `Swarm`-routed `handoffs`). The Claude Agent
+SDK and CrewAI keep both types collapsed onto the same mechanism -- neither
+SDK has any transfer-and-never-return primitive at all, so every edge on
+those two targets already behaves like `delegate` regardless of what this
+file declares; each adapter's own module docstring states that reasoning
+in detail rather than silently degrading.
 
 **Example** (`examples/research-crew/common/interactions.yaml` — a clean
 tree, buildable on all six targets, including Google ADK's strict-tree

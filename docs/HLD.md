@@ -53,12 +53,12 @@ flowchart LR
     REG --> CA[ClaudeAgentSDKAdapter]
     REG --> GA[GoogleADKAdapter]
     REG --> CR[CrewAIAdapter]
-    LG --> LGLIVE["CompiledStateGraph&#10;per-edge handoff tools"]
-    OA --> OLIVE["live agents.Agent&#10;handoffs reference list"]
-    AG --> AGLIVE["AssistantAgent / Swarm&#10;name-string handoffs"]
-    CA --> CALIVE["ClaudeAgentOptions&#10;flat subagent registry"]
-    GA --> GLIVE["live google.adk.Agent&#10;sub_agents tree"]
-    CR --> CRLIVE["live crewai.Crew&#10;crew-wide delegation"]
+    LG --> LGLIVE["CompiledStateGraph&#10;handoff nodes + delegate sub-call tools"]
+    OA --> OLIVE["live agents.Agent&#10;handoffs list + as_tool() delegates"]
+    AG --> AGLIVE["AssistantAgent / Swarm&#10;handoffs + AgentTool/TeamTool delegates"]
+    CA --> CALIVE["ClaudeAgentOptions&#10;flat subagent registry (collapsed)"]
+    GA --> GLIVE["live google.adk.Agent&#10;sub_agents tree + AgentTool delegates"]
+    CR --> CRLIVE["live crewai.Crew&#10;crew-wide delegation (collapsed)"]
 
     MODEL --> MER["mermaid.py&#10;render_mermaid / write_interaction_layer"]
     MER --> IL[interaction-layer.md]
@@ -121,14 +121,14 @@ This is the heart of the HLD: six adapters against the same `common/`
 project, each SDK forcing a different answer to "what does a live agent
 look like" and "how faithfully can we honor `interactions.yaml`'s edges."
 
-| Target | extra | `build()` returns | Model routing | Edge-mapping fidelity |
-|---|---|---|---|---|
-| LangGraph | `langgraph` | compiled `langgraph.graph.state.CompiledStateGraph` — a lone react-agent node if the build root has no outgoing edges, else a multi-node `StateGraph` | `init_chat_model("<provider>:<model>")`, native only for `gemini/openai/anthropic` (no LiteLLM fallback); override is a langchain `"provider:model"` string, passed through as-is | **Precise, per-edge.** One `transfer_to_<destination>` handoff tool per distinct outgoing edge, scoped to the source agent only |
-| OpenAI Agents SDK | `openai` | live `agents.Agent` with a `.handoffs` reference list | bare model id when the resolved provider is `openai`, else `agents.extensions.models.litellm_model.LitellmModel(resolved)`; override passed through as SDK-native form | **Per-agent references.** `handoffs` is `list[Agent \| Handoff]`, shared instances legal; multi-parent graphs and cycles build fine |
-| AutoGen | `autogen` | bare `autogen_agentchat.agents.AssistantAgent` if the build root has no outgoing edges, else a ready-to-run `autogen_agentchat.teams.Swarm` | native `OpenAIChatCompletionClient`/`AnthropicChatCompletionClient` for `openai/anthropic/gemini` (gemini routed through the OpenAI client's own base-url special-casing), else `ValueError`; override → `OpenAIChatCompletionClient(bare id)`, no `model_info` | **Per-agent, by name string.** `handoffs: list[str]` resolved against the team's participants at run time; multi-parent graphs and cycles need no special handling |
-| Claude Agent SDK | `claude` | fully-wired `claude_agent_sdk.ClaudeAgentOptions` — no persistent agent object, this SDK is session/query-based | bare Anthropic model id only (`ClaudeAgentOptions.model`/`AgentDefinition.model`); no LiteLLM path, `ValueError` for any other provider; override passed through as-is | **Flat subagent registry.** Every reachable agent lands once in `options.agents` (a flat `dict`); the Agent tool is granted only to agents that actually have an outgoing edge, so delegation is gated by the graph even though the underlying lookup is technically global |
-| Google ADK | `google-adk` | live `google.adk.agents.Agent` with a nested `sub_agents` tree | bare model id when the resolved provider is `gemini`, else `google.adk.models.lite_llm.LiteLlm(resolved)`; override passed through as SDK-native form | **Strict tree.** An agent can have exactly one parent; a multi-parent graph or a cycle in the reachable subgraph is rejected with a clear `ValueError` before anything is constructed |
-| CrewAI | `crewai` | live `crewai.Crew` — the build root as `manager_agent` of a hierarchical crew (or the sole member of a solo sequential crew if it has no reachable agents), `tasks=[]` | `crewai.LLM(model=resolved)` takes the LiteLLM-format string **directly**, for every provider — no allowlist, no unsupported-provider error at all; override passed through as-is | **Crew-wide, coarsened.** `allow_delegation=True` is all-or-nothing per agent — a delegating agent can reach *any* other crew member, not just its declared out-edges; the graph still controls *whether* an agent can delegate and *which* agents join the crew at all |
+| Target | extra | `build()` returns | Model routing | Edge-mapping fidelity | Delegate/handoff distinction (issue #10) |
+|---|---|---|---|---|---|
+| LangGraph | `langgraph` | compiled `langgraph.graph.state.CompiledStateGraph` — a lone react-agent node if the build root has no outgoing *handoff* edges, else a multi-node `StateGraph` of handoff-reachable agents | `init_chat_model("<provider>:<model>")`, native only for `gemini/openai/anthropic` (no LiteLLM fallback); override is a langchain `"provider:model"` string, passed through as-is | **Precise, per-edge.** One `transfer_to_<destination>` handoff tool per distinct outgoing `handoff` edge, scoped to the source agent only | **Honored.** `handoff` → `Command(goto=dest, graph=Command.PARENT)` (transfers, never returns); `delegate` → a `delegate_to_<dest>` tool that `.invoke()`s an independently-built graph and returns its result |
+| OpenAI Agents SDK | `openai` | live `agents.Agent` with a `.handoffs` reference list (only `handoff` edges) plus `as_tool()`-wrapped delegate tools in `.tools` | bare model id when the resolved provider is `openai`, else `agents.extensions.models.litellm_model.LitellmModel(resolved)`; override passed through as SDK-native form | **Per-agent references.** `handoffs` is `list[Agent \| Handoff]`, shared instances legal; multi-parent graphs and cycles build fine | **Honored.** `handoff` → `.handoffs` (transfers); `delegate` → `dest_agent.as_tool(...)`, whose own docstring states this exact distinction |
+| AutoGen | `autogen` | bare `autogen_agentchat.agents.AssistantAgent` if the build root has no outgoing *handoff* edges, else a ready-to-run `autogen_agentchat.teams.Swarm` of handoff-reachable participants | native `OpenAIChatCompletionClient`/`AnthropicChatCompletionClient` for `openai/anthropic/gemini` (gemini routed through the OpenAI client's own base-url special-casing), else `ValueError`; override → `OpenAIChatCompletionClient(bare id)`, no `model_info` | **Per-agent, by name string.** `handoffs: list[str]` resolved against the team's participants at run time; multi-parent graphs and cycles need no special handling | **Honored.** `handoff` → `AssistantAgent.handoffs` (transfers, `Swarm`-routed); `delegate` → an independently-built destination wrapped in `AgentTool`/`TeamTool` (a plain agent vs. a sub-team that itself hands off), added to `.tools` |
+| Claude Agent SDK | `claude` | fully-wired `claude_agent_sdk.ClaudeAgentOptions` — no persistent agent object, this SDK is session/query-based | bare Anthropic model id only (`ClaudeAgentOptions.model`/`AgentDefinition.model`); no LiteLLM path, `ValueError` for any other provider; override passed through as-is | **Flat subagent registry.** Every reachable agent lands once in `options.agents` (a flat `dict`); the Agent tool is granted only to agents that actually have an outgoing edge, so delegation is gated by the graph even though the underlying lookup is technically global | **Collapsed, documented.** Subagent dispatch is structurally a sub-call (runs, reports back, caller's turn continues) with no transfer-and-never-return primitive anywhere in the SDK — every edge already behaves like `delegate`, so there is no `handoff` shape to route to separately |
+| Google ADK | `google-adk` | live `google.adk.agents.Agent` with a nested `sub_agents` tree (only `handoff` edges) plus `AgentTool`-wrapped delegate subtrees in `.tools` | bare model id when the resolved provider is `gemini`, else `google.adk.models.lite_llm.LiteLlm(resolved)`; override passed through as SDK-native form | **Strict tree.** An agent can have exactly one *handoff* parent; a multi-parent graph or a cycle in the handoff-reachable subgraph is rejected with a clear `ValueError` before anything is constructed | **Honored.** `handoff` → `sub_agents` (transfers via `transfer_to_agent`); `delegate` → `google.adk.tools.AgentTool(agent=<independent subtree>)`, whose own docstring states this exact distinction, exempt from the sub_agents tree constraint |
+| CrewAI | `crewai` | live `crewai.Crew` — the build root as `manager_agent` of a hierarchical crew (or the sole member of a solo sequential crew if it has no reachable agents), `tasks=[]` | `crewai.LLM(model=resolved)` takes the LiteLLM-format string **directly**, for every provider — no allowlist, no unsupported-provider error at all; override passed through as-is | **Crew-wide, coarsened.** `allow_delegation=True` is all-or-nothing per agent — a delegating agent can reach *any* other crew member, not just its declared out-edges; the graph still controls *whether* an agent can delegate and *which* agents join the crew at all | **Collapsed, documented.** CrewAI's only coworker mechanisms (`DelegateWorkTool`/`AskQuestionTool`) both run the coworker and return its result to the caller — there is no transfer-and-never-return primitive here either, so every edge already behaves like `delegate` |
 
 ### The edge-semantics spectrum
 
@@ -190,6 +190,19 @@ documents the gap (if any) rather than papering over it. A project author
 picking a target should read this table as "how much of my delegation
 graph survives," not just "does it build."
 
+This spectrum is about edge *targets* — which destinations an agent can
+reach at all. The delegate/handoff distinction (see "Delegate vs. handoff"
+above, and the fidelity table's last column) is an ORTHOGONAL axis — edge
+*type*, i.e. whether reaching a destination transfers control away for
+good or returns with a result — and the two axes don't move together: a
+target can be precise on one and collapsed on the other. Claude Agent SDK
+sits fourth in per-edge-target fidelity above (a flat registry, narrowed by
+gating tool access) but is fully collapsed on edge type (no `handoff`
+shape exists at all); CrewAI sits coarsest on edge target (crew-wide, not
+per-edge) and is also fully collapsed on edge type, for an unrelated
+reason (no `handoff` shape there either). The other four targets are
+precise, or nearly so, on both axes at once.
+
 ## Key design decisions
 
 **Runtime factory, not codegen.** `project.build(name, target=...)`
@@ -247,16 +260,30 @@ ConfigDict(extra="forbid")`. A typo'd key (`modle:` instead of `model:`)
 is a load-time `ValidationError`, not a silently-ignored field —
 `test_unknown_yaml_key_errors` covers this directly.
 
-**v1 edge-semantics intersection: `delegate` and `handoff` only.**
-`interactions.yaml` supports exactly two edge types. No adapter currently
-distinguishes them in how it builds — every one of the six maps both to
-the one routing mechanism its SDK exposes today (ADK `sub_agents`, OpenAI
-Agents `handoffs`, Claude subagents, CrewAI delegation, AutoGen handoffs,
-LangGraph transfer tools) — but the distinction is preserved in the
-neutral model precisely so a future adapter version (or a future SDK
-capability) can honor it without touching `interactions.yaml`. Richer
-semantics (pipelines, loops, shared state) are explicitly deferred
-(`plan.md`, "Deferred / roadmap").
+**Delegate vs. handoff, honored where the target SDK can express it
+(issue #10).** `interactions.yaml` supports exactly two edge types --
+`delegate` (a sub-call: the caller invokes the callee and control returns
+with its result) and `handoff` (a baton pass: control transfers to the
+callee and does not come back). v1 shipped every adapter collapsing both
+onto the one routing mechanism its SDK exposed at the time (ADK
+`sub_agents`, OpenAI Agents `handoffs`, Claude subagents, CrewAI
+delegation, AutoGen handoffs, LangGraph transfer tools) -- that collapse is
+no longer the whole story. Four of the six targets now build two
+genuinely different structures for the two edge types (LangGraph, Google
+ADK, OpenAI Agents, AutoGen -- see the fidelity table above, "Delegate/
+handoff distinction" column); the remaining two (Claude Agent SDK, CrewAI)
+keep the collapsed mapping, each with a documented reason in its own
+module docstring: neither SDK has ANY mechanism shaped like `handoff` at
+all (a transfer that never returns) -- every edge on those two targets
+already behaves like `delegate` regardless of what `interactions.yaml`
+declares, so collapsing loses nothing further. No adapter change was
+needed in `interactions.yaml` itself or in how a project author writes an
+edge -- the distinction was already in the neutral model (`models.py`
+`InteractionEdge.type`) from v1 onward, precisely so this could be added
+adapter-by-adapter without touching a single `common/` folder. Richer
+semantics (pipelines, loops, shared state) remain explicitly deferred
+(`plan.md`, "Deferred / roadmap") -- out of scope for this feature, which
+covers only the delegate/handoff distinction itself.
 
 **Single target per `build()` call, by design — `build_mixed()` is the
 separate, opt-in entry point for more than one.** `project.build(agent_name,
@@ -326,4 +353,5 @@ against).
   candidate per `plan.md`) — the design doc's "Out of scope" section spells
   out exactly where that plugs into what shipped here.
 - **Richer edge semantics** — sequential/parallel pipelines, loops, shared
-  state — beyond today's `delegate`/`handoff` intersection.
+  state — beyond the `delegate`/`handoff` distinction itself (now honored
+  where each target SDK can express it, see "Delegate vs. handoff" above).
