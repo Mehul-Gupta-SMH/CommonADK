@@ -7,9 +7,9 @@ actual SDK is imported lazily, only when that target is requested via
 keep working with no agent SDK installed at all -- this module has zero SDK
 imports at module scope, exactly like `adapters/__init__.py`.
 
-Only two targets have a runner today -- see docs/runner-design.md's per-SDK
-mapping table for exactly how each of the other four (`claude`, `crewai`,
-`autogen`, `langgraph`) will plug in. `get_runner` distinguishes a target
+Not every target has a runner yet -- see docs/runner-design.md's per-SDK
+mapping table for exactly how each target still in `known_unported_targets()`
+will plug in. `get_runner` distinguishes a target
 that is simply unrecognized (`ValueError`, same message shape as
 `adapters.get_adapter`) from one that is a real, buildable adapter target
 with no runner *yet* (`NotImplementedError` pointing at the design doc) --
@@ -40,12 +40,14 @@ from .trace import Trace
 _REGISTRY: dict[str, tuple[str, str, str]] = {
     "google-adk": ("commonadk.runners.google_adk", "GoogleADKRunner", "google"),
     "openai": ("commonadk.runners.openai_agents", "OpenAIAgentsRunner", "openai"),
+    "autogen": ("commonadk.runners.autogen", "AutoGenRunner", "autogen"),
+    "langgraph": ("commonadk.runners.langgraph", "LangGraphRunner", "langgraph"),
 }
 
 # Real `adapters/` build targets that don't have a runner yet. See
-# docs/runner-design.md, "What each of the four remaining SDKs will map
-# to" for the mapping each would use.
-_UNPORTED_TARGETS = {"claude", "crewai", "autogen", "langgraph"}
+# docs/runner-design.md, "What the remaining unported SDKs will map to"
+# for the mapping each would use.
+_UNPORTED_TARGETS = {"claude", "crewai"}
 
 
 def known_targets() -> list[str]:
@@ -74,8 +76,8 @@ def get_runner(target: str) -> BaseRunner:
         raise NotImplementedError(
             f"commonadk: tracing/streaming for target {target!r} is not "
             f"available yet -- only {known_targets()} have a runner today. "
-            "See docs/runner-design.md, 'What each of the four remaining "
-            f"SDKs will map to', for the mapping planned for {target!r}. "
+            "See docs/runner-design.md, 'What the remaining unported SDKs "
+            f"will map to', for the mapping planned for {target!r}. "
             "`commonadk run` without --stream/--trace still works for it "
             "via the original build-and-print path."
         )

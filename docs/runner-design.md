@@ -102,9 +102,9 @@ yet built) are both plain, SDK-import-free lookups — exactly like
 `adapters.known_targets()` — so the CLI can decide which message to print
 without importing anything.
 
-## Per-SDK mapping — the two implemented runners
+## Per-SDK mapping — the implemented runners
 
-Both verified directly against the **installed** packages, not memory —
+All four verified directly against the **installed** packages, not memory —
 every class and file path below was read during this work.
 
 ### Google ADK (`runners/google_adk.py`) — google-adk 2.7.1
@@ -208,6 +208,85 @@ conversation history lives entirely in the `Session`, so this runner
 rebuilds the `Agent` fresh via `project.build(...)` on every call with no
 correctness cost (the SDK's own documented pattern), rather than caching it
 like the ADK runner caches its `InMemoryRunner`.
+
+### AutoGen (`runners/autogen.py`) — autogen-agentchat/-core/-ext 0.7.5
+
+| Native surface (file : line) | Normalized as |
+|---|---|
+| `TaskRunner.run_stream(task=, output_task_messages=False)` (`autogen_agentchat/base/_task.py:19`) over either a bare `AssistantAgent` or a `Swarm` — both implement the same protocol, so this runner never branches on which one `project.build(...)` returned (see `adapters/autogen_adapter.py`'s own docstring, "WHAT build() RETURNS"). `output_task_messages=False` keeps the echoed user-task message out of the stream entirely, so no message ever has `.source == "user"` to special-case. | The whole run loop this runner drives; the stream's final item is a `TaskResult` (`.messages`), used for `RunFinished.final_text` exactly like `cli.py`'s existing `_run_autogen`. |
+| Every `BaseChatMessage`/`BaseAgentEvent.source: str` (`autogen_agentchat/messages.py:86,161`) | Tracked as `current_agent_name`; a change closes the previous `AgentStarted`/`AgentFinished` pair and opens a new one — genuinely per-message SDK-native attribution, not a heuristic (contrast ADK's author-change inference) and finer-grained than OpenAI Agents' `AgentUpdatedStreamEvent` (which only fires on an actual handoff, not on every message). |
+| `ToolCallRequestEvent.content: List[FunctionCall]` / `ToolCallExecutionEvent.content: List[FunctionExecutionResult]` (`messages.py:445,490`) | `ToolCall`, paired by `FunctionCall.id` / `FunctionExecutionResult.call_id` in a `pending_calls` dict (same correlation pattern as both shipped runners); `duration_ms` is this runner's own wall-clock delta (AutoGen doesn't timestamp tool execution either). `error` comes from `FunctionExecutionResult.is_error: bool \| None`, a real typed field (unlike ADK's dict-convention `"error"` key). |
+| `HandoffMessage.source` / `.target` (`messages.py:421`) | `Transfer(transfer_kind="autogen:handoff")` — a dedicated message type, no inference needed, the cleanest of the two targets this change ports. |
+| Every message's own `.models_usage: RequestUsage \| None` (`messages.py:89,164`; `RequestUsage.prompt_tokens`/`.completion_tokens`, `autogen_core/models/_types.py`) | `LLMCall`, one per message with non-`None` `.models_usage` — verified against `autogen_agentchat/agents/_assistant_agent.py` that this is genuinely one per actual model round-trip (a direct `Response`, a `ToolCallRequestEvent`, or a post-reflection `Response`; the deterministic `ToolCallSummaryMessage` in between never carries usage), the finest per-call granularity of any target in this codebase. |
+| **The `0`-not-`None` wrinkle, AutoGen edition** — verified directly, not assumed from the OpenAI Agents SDK precedent: `autogen_ext.models.openai._openai_client.py:710-712` defaults **both** `RequestUsage` fields to plain `0` (not `None`) whenever the provider's own response carries no usage at all — the exact bug shape this codebase already fixed once for OpenAI Agents (see above). This affects every AutoGen agent on the `openai/...` or `gemini/...` provider branch of `autogen_adapter.py` (both route through `OpenAIChatCompletionClient`). The `anthropic/...` branch (`_anthropic_client.py:685-688`) reads `result.usage.input_tokens`/`.output_tokens` straight from Anthropic's own API response, which always populates it — not affected in practice, but this runner can't tell which client produced a bare `RequestUsage`, so it applies the SAME check uniformly: `reported = bool(usage.prompt_tokens or usage.completion_tokens)`. An all-zero `RequestUsage` is `None` on every `LLMCall` token/cost field, never a confident zero. | Applied per `LLMCall` exactly like the OpenAI Agents SDK runner's own wrinkle. |
+| **Per-agent model resolution** — a deliberate difference from `_resolved_model` in both shipped runners (which resolve once, using only the build root's name): since AutoGen attributes every message to its real producing agent, and a `Swarm`'s participants can each use a different model (the shipped example does: `coordinator`/`writer` on `fast`, `researcher` on `gemini/gemini-2.5-pro` directly), this runner resolves `model`/`cost_usd` **per message source**, memoized per `run()` call — more precise than either shipped runner needs to be, and made possible by AutoGen's finer attribution. | Prevents mispricing a non-root participant's calls under the root agent's model. |
+| **Not available**: per-call duration (`RequestUsage` has no timing field); an inline, SDK-recovered run error the way ADK's `LlmResponse.error_code` is (nothing in the message stream signals a recovered mid-run error) — only the one fatal `RunError` from this runner's own `try/except`, same as the OpenAI Agents SDK runner. | Documented, not guessed. |
+
+**Session/multi-turn**: `RunSession.native["autogen"]` holds `{"built": <the
+`AssistantAgent`/`Swarm` `project.build()` returned>}`. `TaskRunner.
+run_stream`'s own docstring states it "is stateful and a subsequent call
+... will continue from where the previous call left off" — so this
+runner's whole multi-turn story is build once, cache, and call
+`.run_stream(task=prompt, ...)` again on turn 2+ against the SAME object,
+mirroring how the Google ADK runner caches its bound `InMemoryRunner`. One
+caveat verified only at the level stated: a `Swarm`'s `max_turns=
+len(reachable)` (set by `autogen_adapter.py` at construction) is passed
+into a freshly-constructed group-chat-manager on each `run_stream()` call
+(`_base_group_chat.py:225`), which reads as a per-call budget rather than
+one that depletes across the whole session — this was read from the
+source, not independently reproduced with a live multi-turn run.
+
+### LangGraph (`runners/langgraph.py`) — langgraph 1.2.11 / langchain 1.3.17
+
+This target's event mapping was **not** derived from reading the SDK
+source alone — this doc's own row for LangGraph (before this change)
+flagged several specifics as "not yet confirmed against the installed
+version" (which `stream_mode` surfaces tool calls; whether a `Command`
+handoff is visible in the stream at all; whether a checkpointer can be
+attached to the graph this codebase's adapter returns). All three were
+resolved by constructing a real, offline `StateGraph` — using
+`langchain_core.language_models.fake_chat_models.GenericFakeChatModel` in
+place of a network-bound chat model, wired the same way
+`langgraph_adapter.py`'s `create_agent` calls are — and reading the actual
+stream chunks it produces. The corrections below replace, not extend, the
+original row's guesses.
+
+| Native surface (file : line) | Normalized as |
+|---|---|
+| `CompiledStateGraph.astream(input, stream_mode="values", subgraphs=True)` (`langgraph/graph/state.py`) | The whole run loop this runner drives, yielding `(namespace: tuple[str, ...], values: dict)` pairs. **Verified, not guessed**: for a leaf build (bare `create_agent(...)` graph, no outer `StateGraph`), `namespace` is always `()`. For a multi-agent build, `namespace` is `(f"{agent_name}:{uuid}",)` while a step executes inside that agent's own subgraph (a compiled graph used as a node is automatically a subgraph — LangGraph's own behavior), and reverts to `()` for the handful of values the outer graph observes directly (the first chunk; the instant a handoff's `Command(graph=Command.PARENT)` resolves; the final chunk). `namespace[0].split(":", 1)[0]` recovers the commonadk agent name — confirmed identical to the node name `langgraph_adapter.py` used in `builder.add_node(name, node)`. Never more than one segment deep: `create_agent`'s own internal model/tools nodes are plain node functions, not further nested compiled subgraphs. |
+| `AIMessage.name` (verified set to `create_agent(..., name=...)`'s own `name` on every message that agent produces) **and** the namespace above — two independent, agreeing attribution signals | `AgentStarted`/`AgentFinished` on a change of the resolved agent (namespace first, falling back to `.name`, then the currently-open agent, then the build root). `ToolMessage.name` is the TOOL's name, not the agent's, so `ToolCall`/`Transfer` attribution instead comes from the `pending_calls` entry the matching `AIMessage.tool_calls` request queued. Net effect: `LLMCall.agent_name` here is essentially never `None` — a strictly better attribution story than the OpenAI Agents SDK runner's documented multi-handoff gap. |
+| Message `.id` (stable across namespace levels, verified: the exact same `AIMessage.id` appears in both the inner-subgraph chunk that produced it and the later outer `()` chunk that re-surfaces it) | Since `stream_mode="values"` yields the FULL message list on every chunk (not a delta), this runner tracks `seen_ids: set[str]` and processes each message exactly once, the first (most specific) time its id appears — the mechanism that makes the two-namespace-levels-per-message duplication a non-issue rather than a double-counting hazard. |
+| `AIMessage.tool_calls` (`list[ToolCall]` TypedDict, `.name`/`.args`/`.id` — `.args` **already a parsed dict**, unlike AutoGen's/OpenAI's raw JSON string, verified directly) / `ToolMessage.tool_call_id` | `ToolCall`, paired by id in a `pending_calls` dict, same correlation shape as every other runner in this codebase. `duration_ms` is this runner's own wall-clock delta. `ToolMessage.status: Literal["success","error"] = "success"` (`langchain_core/messages/tool.py`, verified via `model_fields`) is a real typed error signal — `error` is `ToolMessage.content` when `status == "error"`. |
+| **Handoffs are NOT a dedicated message type** (a correction, verified directly) — a handoff tool's `Command(goto=..., graph=Command.PARENT)` is consumed entirely by the graph engine; the `ToolMessage` it also builds is indistinguishable BY TYPE from any other tool's result. | This runner detects a handoff by the tool-name convention `langgraph_adapter.py` itself always uses, `transfer_to_<destination>` (a fair, documented coupling to this codebase's own adapter, not a guess about LangGraph in general) — `Transfer(transfer_kind="langgraph:command_handoff")`, `from_agent` from the matching `pending_calls` entry, `to_agent` the suffix after the prefix. Deliberately not ALSO emitted as a `ToolCall`, matching how neither shipped runner double-reports its own SDK-native handoff signal. |
+| `AIMessage.usage_metadata: UsageMetadata \| None` (`langchain_core/messages/ai.py`) | `LLMCall`, one per `AIMessage` with non-`None` `.usage_metadata`. **The `0`-not-`None` wrinkle, LangGraph edition** — verified against `langchain_openai/chat_models/base.py:2001-2009`: `usage_metadata` is only set `if token_usage` (the raw response's own usage dict) is truthy at all, so the outer "was usage reported" question is already answered honestly at the `None`-vs-present level for this integration; this runner still applies the same conservative all-zero check this codebase uses everywhere (`ChatAnthropic`'s and `ChatGoogleGenerativeAI`'s own population paths were not independently re-verified field-by-field, beyond confirming `ChatAnthropic`'s call site, `chat_models.py:2086`, is unconditional on Anthropic's own always-populated `usage`). `model` is still always attached when resolvable, independent of whether that call's usage was reported (the None-vs-0 rule governs token/cost fields, not the model identifier). |
+| **Per-agent model resolution** — same reasoning and shape as the AutoGen runner above: resolved per message source, memoized per `run()` call, not once for the whole run from the build root alone. | Prevents mispricing a non-root participant's calls in a multi-agent graph. |
+| **Not available**: per-call duration (`UsageMetadata` has no timing field); an inline, SDK-recovered run error (nothing in the "values" stream distinguishes a recovered mid-run error from nothing going wrong) — only the one fatal `RunError`, same as the AutoGen and OpenAI Agents SDK runners. | Documented, not guessed. |
+
+**Session/multi-turn — a genuine correction to this doc's original guess,
+not merely an elaboration of it**: the original row speculated a
+`langgraph.checkpoint.*` checkpointer (e.g. `MemorySaver`) would be
+attached for session continuity. Investigated directly and found
+**unreachable** from this runner: `project.build(agent_name, target=
+"langgraph")` — called unmodified, per "Why a separate layer from
+adapters/" above — returns an already-`builder.compile()`d graph with no
+checkpointer attached, and `CompiledStateGraph` exposes no supported way to
+retrofit one after the fact (`langgraph_adapter.py` was out of scope to
+change for this work). Instead, this runner implements session continuity
+itself, entirely outside the graph: `RunSession.native["langgraph"]` holds
+`{"messages": list[BaseMessage]}`, the full accumulated conversation. Each
+turn's input is `{"messages": history + [{"role": "user", "content":
+prompt}]}` (mixing constructed `BaseMessage` objects with a fresh plain
+dict is fine — `MessagesState`'s `add_messages` reducer normalizes either
+form, verified via the same offline construction used throughout this
+investigation), and after the run `history` is replaced with the full
+final message list — so turn N+1 starts exactly where turn N ended. This
+reproduces what a checkpointer would provide (replaying `messages` state
+across calls is the checkpointer's only actual job here) without needing
+one and without touching the adapter. The graph itself is rebuilt fresh via
+`project.build(...)` on every turn regardless of session — it is stateless;
+all continuity lives in `RunSession.native` — mirroring exactly how the
+OpenAI Agents SDK runner rebuilds its `Agent` fresh every turn because
+history lives in the `SQLiteSession`, not the `Agent`.
 
 ### Cost estimation (`runners/pricing.py`)
 
@@ -414,19 +493,22 @@ flowchart TD
     CLI -->|"--trace PATH"| TRACE
 ```
 
-## What each of the four remaining SDKs will map to (for the next agent)
+## What the remaining unported SDKs will map to (for the next agent)
 
-Not implemented in this change — `runners/__init__.py`'s `_UNPORTED_TARGETS`
-names all four, and `get_runner` raises a `NotImplementedError` pointing
-here. Evidence gathered directly against the installed packages so the
-next implementation doesn't have to re-derive it:
+`runners/__init__.py`'s `_UNPORTED_TARGETS` names every real adapter target
+that still has no runner; `get_runner` raises a `NotImplementedError`
+pointing here for each of them. AutoGen and LangGraph, previously listed in
+this table as not-yet-implemented, have since been ported — see "AutoGen"
+and "LangGraph" below (after "OpenAI Agents SDK") for their full mapping,
+now verified against real (offline, fake-model-driven) runs rather than
+read from the SDK source alone. Evidence for the SDKs still unported below
+is gathered directly against the installed packages so that work doesn't
+have to re-derive it:
 
 | Target | Native run surface (file : line) | LLMCall usage source | Cost | Tool-call source | Transfer source | Session/multi-turn story |
 |---|---|---|---|---|---|---|
 | **Claude Agent SDK** (`claude-agent-sdk` 0.2.144) | `claude_agent_sdk.query(prompt=, options=)`, an `AsyncIterator[Message]` where `Message = UserMessage \| AssistantMessage \| SystemMessage \| ResultMessage` (`claude_agent_sdk/types.py:1477`). `AssistantMessage.content` carries `TextBlock`/`ThinkingBlock`/`ToolUseBlock` (`:935-957`); a following `UserMessage` carries the matching `ToolResultBlock` (`.tool_use_id`, `.is_error`, `:959`). | `ResultMessage.usage: dict[str, Any]` and, more precisely, `ResultMessage.model_usage: dict[str, ModelUsage]` (`:1293`) — **per-model** breakdown (`inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`) — but only at the **end of the whole turn**, not per individual model call the way ADK/OpenAI Agents report it; a turn with several internal model calls (tool-calling loop) still yields exactly one `ResultMessage`. So `LLMCall` here would be coarser-grained by construction: **one `LLMCall` per `run()` call**, not one per underlying model round-trip — a real, SDK-imposed limit worth stating plainly rather than fabricating finer granularity. | **Uniquely, the SDK computes cost itself**: `ResultMessage.total_cost_usd: float \| None` and each `ModelUsage.costUSD` (`:1305`) — the pricing table in `pricing.py` should be **bypassed entirely** for this runner; `LLMCall.cost_usd` comes straight from the CLI's own computation, which is more authoritative than a static table could ever be. |  `ToolUseBlock`/`ToolResultBlock` pairing, matched by `.id`/`.tool_use_id`; `duration_ms` faces the same "we time it ourselves" limitation as the other two runners — no per-tool timestamp is exposed. |  Subagent invocation is itself modeled as a specific tool call (the Agent tool, per `adapters/claude_agent.py`'s own docstring) rather than a distinct message type — `Transfer` would need to be derived from a `ToolUseBlock` whose tool name is `"Agent"` (or the per-agent-scoped equivalent), not a dedicated event the SDK emits. | `ClaudeSDKClient` (not the one-shot `query()` function used today) keeps a persistent connection across `.query()` calls, per the SDK's own client/session design — a future runner should use `ClaudeSDKClient` instead of `query()` for `RunSession` support, storing the open client in `RunSession.native["claude"]`. |
 | **CrewAI** (`crewai` 1.15.16) | `crew.kickoff()` (sync) / `crew.kickoff_async()` — no native async event stream; CrewAI's execution is not iterator-based like the other five. | `CrewOutput.token_usage: UsageMetrics` (`crewai/crews/crew_output.py:27`, `crewai/types/usage_metrics.py:32` — `total_tokens`, `prompt_tokens`, `completion_tokens`, `cached_prompt_tokens`, `successful_requests`) is **crew-wide only** — there is no per-agent or per-call breakdown in the public result object; `TaskOutput.agent: str` (`crewai/tasks/task_output.py:43`) names which agent produced each task's output, but carries no usage of its own. So a `runners/crewai_adapter.py` would emit **one `LLMCall` per `run()` call** (not per model round-trip, not per agent) with `agent_name=None` (crew-wide, not attributable) — the coarsest of all six by construction, mirroring CrewAI's own coarsest-of-six edge fidelity noted in `HLD.md`. | No SDK-native cost; would need `pricing.py`, applied to the one crew-wide token count. | CrewAI has step callbacks (`step_callback`/`task_callback` constructor args, not investigated in depth here) that are the likely native source for per-tool-call events — flagged as the next thing to investigate, not assumed. | CrewAI's own `allow_delegation` manager mechanism (`adapters/crewai_adapter.py`'s docstring) has no observable "a delegation happened" event in the public API surfaced by `kickoff()`'s return value alone — likely needs the same callback mechanism as tool calls. | `Crew` objects are not documented as turn-aware; multi-turn would likely mean re-`kickoff()`ing with the prior `CrewOutput.raw` folded into the next task's description — a `RunSession` for this target may need to raise `NotImplementedError` per this doc's "session contract" unless CrewAI's own conversation-memory feature (not investigated here) provides a real primitive. |
-| **AutoGen** (`autogen-agentchat`/`-core`/`-ext` 0.7.5) | `AssistantAgent.run(task=...)` / `Swarm.run(task=...)` → `TaskResult` (`autogen_agentchat/base/_task.py:9`), or the streaming counterpart `.run_stream(...)` (not yet read in this investigation — flagged for the next agent) yielding `BaseAgentEvent \| BaseChatMessage` as they occur. | Each message in `TaskResult.messages` carries its own `.models_usage: RequestUsage | None` (`autogen_agentchat/messages.py:89,164`; `RequestUsage.prompt_tokens`/`.completion_tokens`, `autogen_core/models/_types.py:86`) — genuinely **per-message**, the finest-grained of the four remaining targets, closer to ADK/OpenAI Agents' per-call granularity than Claude's or CrewAI's turn-level-only reporting. `LLMCall` should be one-per-message-with-non-`None`-`models_usage`. | No SDK-native cost; `pricing.py`, applied per message using the per-message token counts above — the finest-grained cost story of the four. | `ToolCallRequestEvent`/`ToolCallExecutionEvent` (`autogen_agentchat/messages.py:445,490`) are dedicated message types in the same stream — a clean, direct `ToolCall` mapping, precise pairing by construction (unlike the "we correlate two separate stream events ourselves" pattern both shipped runners use). | `HandoffMessage` (`autogen_agentchat/messages.py:421`) is a dedicated message type too — direct `Transfer` mapping, no inference needed, the cleanest of the four remaining targets. | `TaskRunner.run`'s own docstring (`autogen_agentchat/base/_task.py:32`) states the runner "is stateful and a subsequent call ... will continue from where the previous call left off" — multi-turn is closer to "free" here than for any other target: `RunSession.native["autogen"]` would just hold the built `AssistantAgent`/`Swarm` instance itself (matching how the Google ADK runner caches its bound `InMemoryRunner`+agent pair across turns) and call `.run(task=...)` again on turn 2+. |
-| **LangGraph** (`langgraph` 1.2.11 / `langchain` 1.3.17) | `graph.invoke(...)` / `graph.astream(...)` over a `MessagesState`-shaped dict; `astream` supports a `stream_mode` param (`"values"`, `"updates"`, `"messages"`, ...) not yet enumerated in depth here. | Per-message: `AIMessage.usage_metadata: UsageMetadata | None` (`langchain_core/messages/ai.py:176`) — set by each underlying chat-model integration when that provider's response includes usage (varies: confirmed the field exists and is `Optional` at the `langchain_core` level, but whether `langchain-google-genai`/`langchain-anthropic`/`langchain-openai` populate it for every provider path this project's adapter can route to was **not** individually re-verified here — flagged for the next agent, do not assume it's always populated just because the field exists). | No SDK-native cost; `pricing.py`, applied per `AIMessage` with non-`None` `usage_metadata`. | LangGraph's own handoff tools (`transfer_to_<destination>`, per `adapters/langgraph_adapter.py`'s docstring) are ordinary tool calls from the graph's point of view — `astream`'s `"updates"` mode (each node's incremental state delta) is the likely place to observe individual tool invocations, not yet confirmed against the installed version. | The `Command(goto=<destination>, graph=Command.PARENT)` primitive the adapter's handoff tools return (`adapters/langgraph_adapter.py`'s docstring) is itself the transfer signal — detecting it in the stream (vs. a plain tool call) needs the specific shape `astream`'s update events give a `Command`-returning tool, not yet confirmed. | `CompiledStateGraph` supports checkpointers (`langgraph.checkpoint.*`, not investigated here) for exactly this purpose — a future runner would attach an in-memory checkpointer (`MemorySaver`, if that's still the current offline-friendly class name in 1.2.11 — not verified) and thread continuity through a `thread_id` in `RunSession.native["langgraph"]`, rather than re-inventing history management. |
 
 The pattern every row above follows, and that a future runner
 implementation should keep following: **read the installed package's
