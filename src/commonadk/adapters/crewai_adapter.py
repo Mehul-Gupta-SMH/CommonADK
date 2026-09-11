@@ -152,7 +152,18 @@ other provider string -- either way the exact `"provider/model"` string
 expects, unchanged. This is the point of this target: there is NO
 unsupported-provider error here, unlike the Google ADK, OpenAI Agents, and
 Claude Agent SDK adapters, each of which special-cases one native provider
-and only reaches LiteLLM (or raises) for everything else. A per-target
+and only reaches LiteLLM (or raises) for everything else.
+
+That native path has a dependency consequence this docstring originally
+understated. Routing to a native client is not free: each one imports its
+own provider package, so `gemini/...` needs `google-genai` and
+`anthropic/...` needs `anthropic`, and without them `LLM(model=...)` raises
+ImportError (`crewai/llms/providers/gemini/completion.py`) before any call
+is made. The `litellm` extra does NOT cover these -- litellm never sees a
+call that crewai routes natively. This project's `crewai` extra therefore
+declares `crewai[litellm,google-genai,anthropic]`: litellm for the fallback
+path, the two provider packages for the native path the shipped example and
+every live smoke run actually take. See pyproject.toml's `crewai` extra. A per-target
 `targets.crewai.model` override in `agent-config.yaml` always wins and is
 passed through as-is to `LLM(model=...)`, exactly like every other adapter's
 override handling.
