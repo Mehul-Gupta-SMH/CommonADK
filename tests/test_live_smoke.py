@@ -119,7 +119,18 @@ def test_list_exits_zero_and_names_every_target_without_an_api_key(monkeypatch):
     assert result.returncode == 0, result.stderr
     for target in ALL_TARGETS:
         assert target in result.stdout
-    assert "unavailable" in result.stdout  # claude/crewai/autogen/langgraph have no runner
+    # This once asserted that some target reported "unavailable", which held
+    # while only google-adk and openai had runners. Issue #22 ported all six,
+    # so nothing is unavailable any more and asserting otherwise would be
+    # asserting a regression. What the column is actually for is honest
+    # reporting of runner availability, so assert that directly against the
+    # registry -- which keeps this test meaningful if a future adapter
+    # (issue #11) lands before its runner and reintroduces an unported target.
+    from commonadk.runners import known_unported_targets
+
+    for target in known_unported_targets():
+        assert target in result.stdout
+    assert result.stdout.count("yes") >= len(ALL_TARGETS) - len(known_unported_targets())
 
 
 # ---------------------------------------------------------------------------

@@ -7,9 +7,14 @@ actual SDK is imported lazily, only when that target is requested via
 keep working with no agent SDK installed at all -- this module has zero SDK
 imports at module scope, exactly like `adapters/__init__.py`.
 
-Not every target has a runner yet -- see docs/runner-design.md's per-SDK
-mapping table for exactly how each target still in `known_unported_targets()`
-will plug in. `get_runner` distinguishes a target
+Every target has a runner as of issue #22, so `known_unported_targets()`
+is empty today -- but the distinction is kept deliberately, because a new
+adapter can land (see issue #11) before its runner does, and that target
+deserves the honest "buildable but not yet traceable" message rather than
+"unknown target". `known_targets()` lists targets that have a runner;
+`known_unported_targets()` the real, buildable adapter targets that do not.
+See docs/runner-design.md's per-SDK mapping table for how each plugs in.
+`get_runner` distinguishes a target
 that is simply unrecognized (`ValueError`, same message shape as
 `adapters.get_adapter`) from one that is a real, buildable adapter target
 with no runner *yet* (`NotImplementedError` pointing at the design doc) --
@@ -42,12 +47,16 @@ _REGISTRY: dict[str, tuple[str, str, str]] = {
     "openai": ("commonadk.runners.openai_agents", "OpenAIAgentsRunner", "openai"),
     "autogen": ("commonadk.runners.autogen", "AutoGenRunner", "autogen"),
     "langgraph": ("commonadk.runners.langgraph", "LangGraphRunner", "langgraph"),
+    "claude": ("commonadk.runners.claude_agent", "ClaudeAgentSDKRunner", "claude"),
+    "crewai": ("commonadk.runners.crewai_runner", "CrewAIRunner", "crewai"),
 }
 
-# Real `adapters/` build targets that don't have a runner yet. See
-# docs/runner-design.md, "What the remaining unported SDKs will map to"
-# for the mapping each would use.
-_UNPORTED_TARGETS = {"claude", "crewai"}
+# Real `adapters/` build targets that don't have a runner yet. Empty since
+# issue #22 ported all six, and kept on purpose: a new adapter (issue #11)
+# can land before its runner, and listing it here is what earns it the
+# specific "buildable, not yet traceable" error instead of "unknown
+# target". See docs/runner-design.md's per-SDK mapping table.
+_UNPORTED_TARGETS: set[str] = set()
 
 
 def known_targets() -> list[str]:
