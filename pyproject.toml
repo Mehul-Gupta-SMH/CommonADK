@@ -64,6 +64,14 @@ autogen = [
     # dependency wrinkle: autogen-core pins protobuf~=5.29, which downgrades
     # protobuf from the newer version google-adk's own dependencies want.
     # No installed code path this project's tests exercise is affected.
+    # Re-verified 2026-09-11 (issue #12 dependency-pin watch): a real
+    # `pip install -e ".[google,openai,claude,crewai,autogen,langgraph,dev]"`
+    # still resolves (dry-run exits 0, no ResolutionImpossible); `pip check`
+    # against the resulting env (protobuf 5.29.6, satisfying this pin) shows
+    # only this same protobuf tension plus the openai-agents-wants->=3-but-
+    # crewai-pins-<3 tension already documented in the `langgraph` extra's
+    # comment below -- nothing new, nothing broken. Full 259-test suite
+    # still green.
     "autogen-agentchat",
     "autogen-ext[openai,anthropic]",
     # `anthropic<1` -- REQUIRED, not a style choice. Verified live (M8 first
@@ -100,6 +108,11 @@ autogen = [
     # extra. A real `pip install -e ".[google,openai,claude,crewai,autogen,
     # langgraph,dev]"` with this pin in place resolves cleanly to
     # anthropic==0.125.0 with `pip check` reporting no broken requirements.
+    # Re-verified 2026-09-11 (issue #12 dependency-pin watch) against the
+    # currently installed anthropic==0.122.0 and autogen-ext==0.7.5: still
+    # <1, `AsyncMessages.create`'s signature still accepts `temperature`
+    # (checked via `inspect.signature`, not memory), and
+    # `_check_anthropic_temperature_compat()` still finds the pin honored.
     # This pin AVOIDS the upstream bug (autogen_ext still hard-codes the
     # kwarg; it is not fixed), it does not fix it -- see
     # autogen_adapter.py's module docstring for the runtime guard that
