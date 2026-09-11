@@ -277,7 +277,49 @@ evaluated false there), installs all six SDK extras, runs the script,
 writes the summary table to the job's `$GITHUB_STEP_SUMMARY`, and uploads
 the JSON report plus every per-target trace file as a build artifact.
 
-**Live run #4 — 2026-09-10.** [GitHub Actions run
+**Live run #5 — 2026-09-10: all six targets green.** [GitHub Actions run
+#5](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34541706890),
+`workflow_dispatch` on `main` at commit `b16990e`, model
+`claude-haiku-4-5`, all six targets, `dry_run: false`. This is the run
+taken after the two fixes below landed, and it is the current reference
+result:
+
+```
+target       status       wall_s   tokens   cost_usd  final_text
+----------------------------------------------------------------
+google-adk   success        9.74     1716   0.002012  That text has 9 words.
+openai       success        2.42        ?          ?  That text has 9 words.
+claude       success        3.21        -          -  That text has 9 words.
+crewai       success        6.76        -          -  That text has 9 words.
+autogen      success        1.26        -          -  9
+langgraph    success        1.54        -          -  That text has 9 words.
+```
+
+**Six of six SDKs executed a real turn from one unmodified agent
+definition** — each called `claude-haiku-4-5`, invoked the `count_words`
+tool, and returned the tool's answer. The project's hypothesis, verified
+at runtime on every supported target.
+
+Three things in that table are worth reading carefully:
+
+- **`autogen` now succeeds** (1.26s) where run #4 failed before reaching
+  the API. The `anthropic<1` pin in the `autogen` extra took effect on a
+  fresh CI install, confirming the fix in the environment that broke.
+- **`openai` reports `?`, not `0`/`$0.000000`.** That `?` means "the SDK
+  did not report usage" — the honesty fix working in production. Run #4
+  printed a confident zero for the same call; the number was never real.
+  See "the 0-not-None wrinkle" in [`runner-design.md`](runner-design.md).
+- **`autogen` answered `9` rather than `"That text has 9 words."`** Same
+  tool, same correct result, different presentation — identical
+  instructions produce different response shapes across frameworks. Not a
+  defect; a property of the frameworks worth knowing about.
+
+Note on timings: `crewai` took 6.76s here against 25.52s in run #4 — the
+same work, a ~4x swing between two runs minutes apart. Treat every wall
+time on this page as one sample on shared CI hardware, never as a
+benchmark.
+
+**Live run #4 — 2026-09-10 (superseded by #5, kept as the record of what the first real run exposed).** [GitHub Actions run
 #4](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34539312259),
 triggered by `workflow_dispatch` on `main` at commit `772cab3`, model
 `claude-haiku-4-5`, all six targets, `dry_run: false`. Verbatim summary
