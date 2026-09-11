@@ -308,29 +308,38 @@ def test_report_shape_and_usage_marker_for_all_targets(live_smoke, monkeypatch, 
     results_by_target = {r["target"]: r for r in data["results"]}
     assert set(results_by_target) == set(ALL_TARGETS)
 
-    # google-adk / openai: the two runner-backed targets get real usage data.
-    for target in ("google-adk", "openai"):
-        r = results_by_target[target]
-        assert r["status"] == "success"
-        assert r["final_text"] == "That text has 9 words."
-        assert isinstance(r["usage"], dict)
-        assert r["usage"]["total_tokens"] == 20
-        assert r["usage"]["cost_usd"] == pytest.approx(0.00006)
-        assert r["usage"]["usage_complete"] is True
-        assert r["trace_file"] == f"{target}-trace.json"
-        assert (out_dir / r["trace_file"]).is_file()
+    # Which targets get real usage data is decided by the runner registry,
+    # not by a hardcoded list. This test used to name google-adk/openai as
+    # the runner-backed pair and the other four as permanently
+    # "unavailable"; issue #22 ported all six, so that split is now a
+    # description of a limitation that no longer exists. Keying off the
+    # registry keeps both branches meaningful if an adapter ever lands
+    # before its runner (issue #11).
+    from commonadk.runners import known_targets as runner_known_targets
 
-    # claude / crewai / autogen / langgraph: no runner -- usage must be the
-    # explicit string "unavailable", never 0, never null (which could be
-    # misread as "reported zero usage").
-    for target in ("claude", "crewai", "autogen", "langgraph"):
+    traced = set(runner_known_targets())
+    assert traced, "expected at least one runner-backed target"
+
+    for target in ALL_TARGETS:
         r = results_by_target[target]
         assert r["status"] == "success"
         assert r["final_text"] == "That text has 9 words."
-        assert r["usage"] == "unavailable"
-        assert r["usage"] != 0
-        assert r["usage"] is not None
-        assert r["trace_file"] is None
+
+        if target in traced:
+            assert isinstance(r["usage"], dict)
+            assert r["usage"]["total_tokens"] == 20
+            assert r["usage"]["cost_usd"] == pytest.approx(0.00006)
+            assert r["usage"]["usage_complete"] is True
+            assert r["trace_file"] == f"{target}-trace.json"
+            assert (out_dir / r["trace_file"]).is_file()
+        else:
+            # No runner -- usage must be the explicit string "unavailable",
+            # never 0, never null (either could be misread as "reported zero
+            # usage", i.e. a free call).
+            assert r["usage"] == "unavailable"
+            assert r["usage"] != 0
+            assert r["usage"] is not None
+            assert r["trace_file"] is None
 
 
 def test_a_failing_target_is_recorded_and_exits_nonzero_others_unaffected(

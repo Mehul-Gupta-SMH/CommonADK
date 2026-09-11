@@ -17,7 +17,9 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 | #6 | CI: core job, a matrix leg per SDK extra, and a non-blocking all-extras job |
 | #7 | **Released on PyPI** — `pip install commonadk` (v0.0.1), published by the tag-triggered workflow |
 | #9 | Mixed-target spawning foundation: `runtime:` honored in-process, native per-runtime islands, cross-runtime edges bridged by plain callables ([design](docs/mixed-target-design.md)) |
-| #12 | Broader `model_params` per adapter (per-provider maps where SDKs need them) and the `commonadk new <agent>` scaffolding command |
+| #12 | Broader `model_params` per adapter (per-provider maps where SDKs need them), the `commonadk new <agent>` scaffolding command, and the standing dependency-pin watch — all eight neutral params re-verified against installed SDK source |
+| [#22](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/22) | **Execution and telemetry layer** — a real runner for **all six targets**, with normalized per-step events, token/cost meters and observe-only hooks. Usage is reported honestly or not at all: a gap is `null` with `usage_complete: false`, never a `0` that would read as a free call. Claude takes cost from the SDK's own figure rather than a static table; CrewAI reports genuine per-call usage off its event bus ([design](docs/runner-design.md)) |
+| [#10](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/10) | **delegate vs handoff honored** on 4 of 6 targets — LangGraph, Google ADK, OpenAI Agents and AutoGen each express sub-call-that-returns separately from transfer-that-does-not. Claude and CrewAI keep the collapsed mapping because neither SDK has any transfer-and-never-return primitive (the remaining #10 items — pipelines, fan-out, loops, shared state — are still open) |
 | [#8](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/8) | Verified live runs — **all 6 targets** execute one real turn from the same unmodified agent definition against `examples/live-smoke/common` on `claude-haiku-4-5`, each invoking the tool and returning its answer ([run #5](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34541706890), captured in [docs/demo-runs.md](docs/demo-runs.md#live-runs)). The first run exposed two real defects, both fixed: an `autogen-ext`/`anthropic` 1.x incompatibility, and the openai runner reporting unmeasured usage as a confident zero |
 
 ## Next up
@@ -30,9 +32,9 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 
 | Feature | Issue |
 |---|---|
-| **Richer edge semantics** — honor delegate vs handoff where expressible; pipelines, parallel fan-out, loops, shared state | [#10](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/10) |
+| **Richer edge semantics, part two** — sequential pipelines, parallel fan-out/fan-in, loops with exit conditions, shared state (delegate vs handoff already shipped, see above) | [#10](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/10) |
 | **Additional adapters** — Semantic Kernel, PydanticAI, Strands, smolagents (help wanted) | [#11](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/11) |
-| **Quality backlog** — observability hooks and the dependency-pin watch remain (good first issues) | [#12](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/12) |
+| **Quality backlog** — build-time observability logging around `load()`/`build()` is the one checkbox left (good first issue; the run-time half shipped with #22) | [#12](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/12) |
 
 ## Principles that carry forward
 

@@ -40,12 +40,15 @@ Usage:
 
 Per target, this script builds the entry agent, runs exactly one real turn,
 and records: outcome (success/error), wall time, a truncated final answer,
-and -- for `google-adk`/`openai`, the two targets `commonadk.runners`
-supports (issue #22) -- the full normalized trace with token counts and
+and -- for every target `commonadk.runners` has a runner for, which since
+issue #22 is all six -- the full normalized trace with token counts and
 cost, honest about any gap (`usage_complete`/`cost_complete`, never a
-silently-summed partial total). The other four targets have no runner yet,
-so this script records `"usage": "unavailable"` for them explicitly --
-never `0`, which would misleadingly claim the call was free.
+silently-summed partial total). Any target without a runner (an adapter can
+land before its runner does, see issue #11) records `"usage": "unavailable"`
+explicitly -- never `0`, which would misleadingly claim the call was free.
+Note that "unavailable" here means "no runner"; a runner that ran but got
+no usage from its SDK reports null token/cost fields inside a real trace,
+which is a different and equally deliberate kind of honest gap.
 
 A missing `ANTHROPIC_API_KEY` fails loudly and immediately, before touching
 any target and before writing any report file -- never a hang, never an
@@ -79,12 +82,22 @@ if str(SRC) not in sys.path and (SRC / "commonadk").is_dir():
 # targets" table, cli.py's --target metavar, ...).
 TARGET_ORDER = ["google-adk", "openai", "claude", "crewai", "autogen", "langgraph"]
 
-# The two targets commonadk.runners has a runner for today (issue #22) --
-# only these get a full normalized trace with token/cost data. The other
-# four are run through the same build-and-print path `commonadk run` itself
-# uses for them (cli._RUN_TARGETS), which has no usage data to report at
-# all -- see the module docstring's "usage: unavailable" note.
-RUNNER_TARGETS = {"google-adk", "openai"}
+def _runner_targets() -> set[str]:
+    """Targets that have a runner, and so get a full normalized trace with
+    token/cost data. Anything else is run through the same build-and-print
+    path `commonadk run` uses (cli._RUN_TARGETS), which has no usage to
+    report -- see the module docstring's "usage: unavailable" note.
+
+    Derived from the registry rather than hardcoded. This was a literal
+    `{"google-adk", "openai"}` while those were the only two runners; issue
+    #22 ported all six, and a hardcoded list would have silently kept
+    reporting the four new ones as "unavailable" -- a live run that appeared
+    to pass while never exercising them at all. `--list` already read the
+    registry, so the two had drifted apart.
+    """
+    from commonadk.runners import known_targets as runner_known_targets
+
+    return set(runner_known_targets())
 
 # The only three current, valid Anthropic model ids this project uses
 # anywhere -- never a date-suffixed id (see pricing.py, which prices exactly
@@ -175,7 +188,7 @@ def run_target(
             usage="not_called (dry run)",
         )
 
-    if target in RUNNER_TARGETS:
+    if target in _runner_targets():
         return _run_via_runner(project, agent_name, target, prompt, out_dir, t0)
     return _run_via_cli_path(project, agent_name, target, prompt, t0)
 
