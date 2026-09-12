@@ -48,7 +48,22 @@ crewai = [
     # adapters/crewai_adapter.py's module docstring, "Model routing") -- the
     # `litellm` extra is what makes that fallback path actually work instead
     # of raising ImportError for an unrecognized provider.
-    "crewai[litellm]",
+    #
+    # `google-genai` and `anthropic` are the NATIVE side of that same routing
+    # decision, and are required, not optional. crewai recognizes `gemini/...`
+    # and `anthropic/...` as known providers and takes its native client path
+    # for them -- litellm never sees those calls, so the `litellm` extra alone
+    # does not cover them. Without these, building any agent on a gemini model
+    # raises ImportError from crewai/llms/providers/gemini/completion.py
+    # ('Google Gen AI native provider not available'), which is exactly what
+    # the shipped research-crew example uses, and anthropic is what every live
+    # smoke run uses.
+    #
+    # This was masked locally and in the all-extras CI job, where the `google`
+    # extra happens to pull `google-genai` in transitively via google-adk; only
+    # the crewai-only matrix leg installs crewai without it, which is precisely
+    # what that leg exists to catch.
+    "crewai[litellm,google-genai,anthropic]",
 ]
 autogen = [
     # Microsoft's current AutoGen stack (autogen-agentchat/-core/-ext,
@@ -64,6 +79,14 @@ autogen = [
     # dependency wrinkle: autogen-core pins protobuf~=5.29, which downgrades
     # protobuf from the newer version google-adk's own dependencies want.
     # No installed code path this project's tests exercise is affected.
+    # Re-verified 2026-09-11 (issue #12 dependency-pin watch): a real
+    # `pip install -e ".[google,openai,claude,crewai,autogen,langgraph,dev]"`
+    # still resolves (dry-run exits 0, no ResolutionImpossible); `pip check`
+    # against the resulting env (protobuf 5.29.6, satisfying this pin) shows
+    # only this same protobuf tension plus the openai-agents-wants->=3-but-
+    # crewai-pins-<3 tension already documented in the `langgraph` extra's
+    # comment below -- nothing new, nothing broken. Full 259-test suite
+    # still green.
     "autogen-agentchat",
     "autogen-ext[openai,anthropic]",
     # `anthropic<1` -- REQUIRED, not a style choice. Verified live (M8 first
@@ -100,6 +123,11 @@ autogen = [
     # extra. A real `pip install -e ".[google,openai,claude,crewai,autogen,
     # langgraph,dev]"` with this pin in place resolves cleanly to
     # anthropic==0.125.0 with `pip check` reporting no broken requirements.
+    # Re-verified 2026-09-11 (issue #12 dependency-pin watch) against the
+    # currently installed anthropic==0.122.0 and autogen-ext==0.7.5: still
+    # <1, `AsyncMessages.create`'s signature still accepts `temperature`
+    # (checked via `inspect.signature`, not memory), and
+    # `_check_anthropic_temperature_compat()` still finds the pin honored.
     # This pin AVOIDS the upstream bug (autogen_ext still hard-codes the
     # kwarg; it is not fixed), it does not fix it -- see
     # autogen_adapter.py's module docstring for the runtime guard that

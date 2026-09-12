@@ -1,12 +1,43 @@
 """OpenAI Agents SDK adapter: `AgentSpec` -> live `agents.Agent`.
 
-Edge semantics (v1 intersection decision, plan.md "Edge semantics v1"):
-both `delegate` and `handoff` edges map to OpenAI Agents `handoffs` -- the
-SDK exposes a single mechanism (an agent's `handoffs` list) regardless of
-which of the two an edge declares in `interactions.yaml`. commonadk does not
-yet distinguish them for OpenAI Agents; the distinction exists in the
-neutral model so it *can* be honored by an adapter that supports it (or by a
-future SDK feature) without changing `interactions.yaml`.
+Edge semantics -- THIS ADAPTER HONORS THE DELEGATE/HANDOFF DISTINCTION
+(GitHub issue #10's first checkbox), not the v1 collapsed mapping every
+other adapter in this codebase still uses: the installed SDK (openai-agents
+0.21.1) has two genuinely distinct mechanisms, and `Agent.as_tool`'s own
+docstring states the difference in exactly these terms (verified via
+`inspect.getdoc(agents.Agent.as_tool)`, not assumed):
+
+    "This is different from handoffs in two ways:
+    1. In handoffs, the new agent receives the conversation history. In
+       this tool, the new agent receives generated input.
+    2. In handoffs, the new agent takes over the conversation. In this
+       tool, the new agent is called as a tool, and the conversation is
+       continued by the original agent."
+
+That second point is exactly this project's delegate/handoff split (models.py
+`InteractionEdge.type`): "takes over the conversation" (control transfers
+and never returns) is `handoff`; "called as a tool, conversation is
+continued by the original agent" (a sub-call that returns) is `delegate`.
+So:
+
+- `handoff` edges map to `agent.handoffs` (unchanged from before this
+  feature) -- the destination `Agent` is appended to the source's
+  `handoffs` list, and the SDK's own `Runner` hands the whole conversation
+  over to it when the model calls the corresponding built-in handoff tool.
+- `delegate` edges map to `dest_agent.as_tool(tool_name=f"delegate_to_
+  {dest}", tool_description=...)` (new), appended to the source's `tools`
+  list instead -- a plain `FunctionTool` that runs the destination agent to
+  completion on a generated input and returns its output as this tool
+  call's result, with the SOURCE agent's own run continuing right after
+  (verified via `inspect.getsource(Agent.as_tool)`: it builds a
+  `FunctionTool` whose `on_invoke_tool` calls `Runner.run(self, input, ...)`
+  and returns the extracted output as a string -- no conversation-transfer
+  primitive involved at all).
+
+Both mechanisms build on the same memoized `dict[str, Agent]` this adapter
+already maintains (see "KEY DIFFERENCE" below), so a `delegate` edge to a
+destination also reachable via a `handoff` edge elsewhere in the graph wraps
+the SAME shared `Agent` instance in `as_tool()` -- no duplicate construction.
 
 KEY DIFFERENCE from the Google ADK adapter -- handoffs are references, not a
 tree: `agents.Agent.handoffs` is a plain `list[Agent | Handoff]` field on a
@@ -78,12 +109,14 @@ class OpenAIAgentsAdapter(BaseAdapter):
         """Return the single shared `Agent` instance for `name`, building it
         (and everything reachable from it) if this is the first visit.
 
-        Two-pass per agent: construct the `Agent` with `handoffs=[]`, record
-        it in `memo` *before* recursing into its own handoff targets, then
-        fill in `handoffs` afterward. Recording before recursing is what
-        makes a cycle safe -- if agent B's handoff graph loops back to A,
-        the recursive call for A finds A already in `memo` and reuses it
-        instead of recursing forever.
+        Two-pass per agent: construct the `Agent` with `handoffs=[]` (its
+        own tools list already includes its `tools.py` functions), record it
+        in `memo` *before* recursing into its own outgoing edges, then fill
+        in `handoffs` and append delegate tools afterward. Recording before
+        recursing is what makes a cycle safe -- if agent B's outgoing edges
+        loop back to A (via either edge type), the recursive call for A
+        finds A already in `memo` and reuses it instead of recursing
+        forever.
         """
         if name in memo:
             return memo[name]
@@ -100,10 +133,24 @@ class OpenAIAgentsAdapter(BaseAdapter):
         )
         memo[name] = agent
 
+        # See module docstring, "Edge semantics" -- `handoff` edges transfer
+        # the conversation (agents.handoffs); `delegate` edges are a sub-call
+        # that returns (agent.as_tool(...), appended to agent.tools).
         agent.handoffs = [
             self._get_or_build(project, edge.to, memo)
             for edge in project.graph.edges
-            if edge.from_ == name
+            if edge.from_ == name and edge.type == "handoff"
+        ]
+        agent.tools = agent.tools + [
+            self._get_or_build(project, edge.to, memo).as_tool(
+                tool_name=f"delegate_to_{edge.to}",
+                tool_description=(
+                    f"Delegate a task to the '{edge.to}' agent and receive "
+                    f"its result back into this conversation."
+                ),
+            )
+            for edge in project.graph.edges
+            if edge.from_ == name and edge.type == "delegate"
         ]
         return agent
 

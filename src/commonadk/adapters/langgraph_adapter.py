@@ -1,36 +1,43 @@
 """LangGraph adapter: `AgentSpec` -> a live, compiled `langgraph` graph.
 
 WHAT `build()` RETURNS -- read this first, verified not assumed: every
-reachable agent is built as its own prebuilt react agent -- a
-`langgraph.graph.state.CompiledStateGraph` from `langchain.agents.
-create_agent(model, tools=..., system_prompt=..., name=...)`. This is the
-CURRENT idiomatic entry point, not `langgraph.prebuilt.create_react_agent`:
-that function still exists and still works in the installed stack
-(langgraph 1.2.11), but calling it emits `LangGraphDeprecatedSinceV10:
-create_react_agent has been moved to langchain.agents. Please update your
-import to from langchain.agents import create_agent` -- verified directly by
-calling it -- so this adapter uses `create_agent` (from the `langchain`
-package, not `langgraph`), its documented replacement, throughout.
+HANDOFF-reachable agent (see "Edge mapping" below -- this is now scoped to
+`handoff` edges specifically, not "any outgoing edge", since issue #10) is
+built as its own prebuilt react agent -- a `langgraph.graph.state.
+CompiledStateGraph` from `langchain.agents.create_agent(model, tools=...,
+system_prompt=..., name=...)`. This is the CURRENT idiomatic entry point,
+not `langgraph.prebuilt.create_react_agent`: that function still exists and
+still works in the installed stack (langgraph 1.2.11), but calling it emits
+`LangGraphDeprecatedSinceV10: create_react_agent has been moved to
+langchain.agents. Please update your import to from langchain.agents import
+create_agent` -- verified directly by calling it -- so this adapter uses
+`create_agent` (from the `langchain` package, not `langgraph`), its
+documented replacement, throughout.
 
-- The build root has NO outgoing edges (a leaf, e.g. `writer` in the shipped
-  example): this adapter returns that agent's own compiled react graph
-  directly -- there is nothing else in the picture, so the simplest, most
-  directly runnable object is exactly what `create_agent` already produced.
-- The build root HAS at least one outgoing edge (e.g. `coordinator` or
-  `researcher`): every agent reachable from the build root (`BaseAdapter.
-  _reachable_agents`) is built the same way, each wired with a HANDOFF TOOL
-  per outgoing `interactions.yaml` edge (see "Edge mapping" below), and all
-  of them are wired together as NODES of one parent `langgraph.graph.
-  StateGraph(MessagesState)`, with a single `START -> <build root>` edge as
-  the entry point. `builder.compile()` returns the final, ready-to-run
-  `CompiledStateGraph` for the WHOLE multi-agent graph -- the build root's
-  handoff tools (and every downstream agent's own handoff tools) are what
-  actually drive routing between nodes at run time, not any edges added to
-  `builder` beyond that one entry edge (verified: a `Command(goto=...,
-  graph=Command.PARENT)` returned from a node's tool call is LangGraph's own
-  documented mechanism for jumping to a *sibling* node in the parent graph,
-  no static `builder.add_edge(a, b)` needed or even meaningful between
-  agent nodes here).
+- The build root has NO outgoing HANDOFF edges (either a true leaf with no
+  edges at all, e.g. `writer` in the shipped example, OR a root whose
+  outgoing edges are all `delegate`, e.g. `coordinator`): this adapter
+  returns that agent's own compiled react graph directly -- there is
+  nothing else needing a parent `StateGraph`, so the simplest, most
+  directly runnable object is exactly what `create_agent` already
+  produced, its own `delegate_to_<dest>` tool(s) (see "Edge mapping" below)
+  already wired into its own `tools=[...]`.
+- The build root HAS at least one outgoing HANDOFF edge (e.g. `researcher`
+  in the shipped example): every agent HANDOFF-reachable from the build
+  root (`BaseAdapter._reachable_via(..., {"handoff"})`) is built the same
+  way, each wired with a HANDOFF TOOL per outgoing `handoff` edge (see
+  "Edge mapping" below), and all of them are wired together as NODES of one
+  parent `langgraph.graph.StateGraph(MessagesState)`, with a single
+  `START -> <build root>` edge as the entry point. `builder.compile()`
+  returns the final, ready-to-run `CompiledStateGraph` for the WHOLE
+  multi-agent graph -- the build root's handoff tools (and every downstream
+  agent's own handoff tools) are what actually drive routing between nodes
+  at run time, not any edges added to `builder` beyond that one entry edge
+  (verified: a `Command(goto=..., graph=Command.PARENT)` returned from a
+  node's tool call is LangGraph's own documented mechanism for jumping to a
+  *sibling* node in the parent graph, no static `builder.add_edge(a, b)`
+  needed or even meaningful between agent nodes here). A `delegate`-only
+  destination is NEVER one of these nodes -- see "Edge mapping" below.
 
 Usage (mirroring cli.py's `_run_langgraph`):
 
@@ -57,22 +64,72 @@ what older LangGraph tutorials describe -- see the `create_react_agent`
 deprecation above).
 
 Edge mapping -- PER-EDGE TARGETING, unlike every coarser adapter in this
-codebase: LangGraph is the one target here where `interactions.yaml`'s edge
-*targets* are fully, precisely expressible. Both `delegate` and `handoff`
-edges map to the SAME mechanism in v1 (plan.md's stated intersection
-decision, matching every other adapter) -- a HANDOFF TOOL, one per distinct
-outgoing edge destination, named `transfer_to_<destination>` (see
-`_make_handoff_tool` below) and added to the SOURCE agent's own tool list.
-Unlike CrewAI's `allow_delegation=True` (crew-wide -- any member can reach
-any other member once delegation is on at all) or AutoGen's `Swarm`
-(name-string handoffs resolved against a flat team-wide participant list,
-functionally global once inside the graph), a LangGraph handoff tool is a
-distinct, individually-named, individually-invocable tool scoped to
-EXACTLY the one agent it was built for -- an agent with edges to `x` and
-`y` gets exactly two handoff tools, `transfer_to_x` and `transfer_to_y`, and
-literally cannot reach any other reachable agent unless a matching edge (and
-therefore a matching tool) exists for it. This is the most precise
-`interactions.yaml` <-> SDK-native mapping of any adapter in this codebase.
+codebase, AND (since issue #10, the delegate/handoff distinction's first
+checkbox) THE ONE ADAPTER THAT MOST FULLY HONORS IT: LangGraph is named
+explicitly in the issue as the target where the distinction "can today" be
+expressed, via `langgraph.types.Command`'s genuine return-vs-transfer split
+-- verified directly, not assumed, against the installed SDK (langgraph
+1.2.11):
+
+- `handoff` edges map to a HANDOFF TOOL, one per distinct outgoing `handoff`
+  edge destination, named `transfer_to_<destination>` (see
+  `_make_handoff_tool` below) and added to the SOURCE agent's own tool
+  list. Unchanged from before this feature: it returns `Command(goto=
+  <destination>, graph=Command.PARENT)` -- CONTROL TRANSFERS to the sibling
+  node and never returns, LangGraph's own documented multi-agent handoff
+  primitive (see "Handoff mechanism" below). Unlike CrewAI's
+  `allow_delegation=True` (crew-wide -- any member can reach any other
+  member once delegation is on at all) or AutoGen's `Swarm` (name-string
+  handoffs resolved against a flat team-wide participant list, functionally
+  global once inside the graph), a LangGraph handoff tool is a distinct,
+  individually-named, individually-invocable tool scoped to EXACTLY the one
+  agent it was built for -- an agent with handoff edges to `x` and `y` gets
+  exactly two handoff tools, `transfer_to_x` and `transfer_to_y`, and
+  literally cannot reach any other reachable agent unless a matching edge
+  (and therefore a matching tool) exists for it.
+- `delegate` edges map to a DELEGATE TOOL, one per distinct outgoing
+  `delegate` edge destination, named `delegate_to_<destination>` (see
+  `_make_delegate_tool` below) and added to the SOURCE agent's own tool
+  list. This is NEW (issue #10): the delegate tool's destination is built
+  by recursing into this adapter's OWN `build()` for that destination name
+  (see "Recursive construction" below) -- a structurally SEPARATE,
+  independently-compiled graph, never a node of the source's own parent
+  `StateGraph` -- and the tool handler synchronously calls that compiled
+  graph's own `.invoke(...)`, returning its final message's content as a
+  plain string tool result. CONTROL RETURNS to the calling agent's own
+  react loop right after -- the destination's `.invoke()` call completes
+  and hands its result back as an ordinary `ToolMessage` in the CALLER's
+  own conversation, exactly this project's `delegate` semantic (a sub-call
+  that returns), and the structural mirror of `handoff`'s `Command(...,
+  graph=Command.PARENT)` transfer that never returns. Both tool names are
+  independently addressable, so a source with a `delegate` edge to `x` and
+  a `handoff` edge to `y` gets exactly `delegate_to_x` and `transfer_to_y`
+  -- both mechanisms coexist on the same agent without collision.
+
+This is the most precise `interactions.yaml` <-> SDK-native mapping of any
+adapter in this codebase, now precise on BOTH axes -- edge *target* (as
+before this feature) AND edge *type* (new).
+
+Recursive construction: a `delegate` edge's destination is built by calling
+`self.build(project, dest_name, _delegate_ancestors=...)` -- literally the
+same top-level method this adapter's own callers use, not a separate code
+path -- so a delegate destination that itself has further `handoff` edges
+gets its own, fully independent multi-node `StateGraph` (wrapped in the
+delegate tool exactly as if someone had called `project.build(dest_name,
+target="langgraph")` directly), and a delegate destination that is a leaf
+(or has only its own further `delegate` edges) gets its own bare compiled
+react agent. This mirrors Google ADK's `AgentTool`-wraps-an-independent-
+subtree design after this same feature, for the same reason: a `delegate`
+edge is a sub-call to a self-contained, independently-runnable unit, not a
+reference into the caller's own graph. Because each `delegate` recursion is
+a genuinely fresh, independent build (not a reference to an already-built
+node the way sibling `handoff` nodes share one `StateGraph`), a cycle
+closed by `delegate` edges (or a mix of the two types) is a real
+unbounded-recursion hazard at construction time -- `build()` threads one
+`_delegate_ancestors` chain through this recursion and raises a clear
+`ValueError` before ever recursing past a repeated name (see "KEY
+PROPERTY" below for why a cycle closed ENTIRELY by `handoff` edges remains
+no hazard at all, unchanged from before this feature).
 
 Handoff mechanism, investigated not assumed: this adapter hand-rolls the
 handoff tool itself using LangGraph's own `Command` primitive, rather than
@@ -92,20 +149,23 @@ building this `Command` and a `ToolMessage` acknowledging the transfer, so
 handoffs cost no extra model round-trip beyond the one that already decided
 to call the tool.
 
-KEY PROPERTY, investigated -- multi-parent graphs and cycles both build
-successfully, verified directly (see test_adapter_langgraph.py): every
-reachable agent is built exactly ONCE into a `dict[str, CompiledStateGraph]`
-keyed by logical agent name (mirroring `_reachable_agents`'s own dedup, like
+KEY PROPERTY, investigated -- multi-parent graphs and cycles closed by
+`handoff` edges both build successfully, verified directly (see
+test_adapter_langgraph.py): every HANDOFF-reachable agent is built exactly
+ONCE into a `dict[str, CompiledStateGraph]` keyed by logical agent name
+(mirroring `BaseAdapter._reachable_via(..., {"handoff"})`'s own dedup, like
 every other adapter's flat-registry construction), and `StateGraph.add_node`
 is called once per dict entry. A destination reachable from two different
 sources is simply the same node referenced by two different `transfer_to_*`
 tools on two different source nodes -- no duplication, no special-casing. A
-cycle back to the build root (e.g. `writer -> coordinator`) is just another
-`transfer_to_coordinator` tool on `writer`, targeting a node that already
-exists in the same `StateGraph` -- `Command(goto="coordinator", graph=
-Command.PARENT)` resolves it by name at run time with no construction-time
-recursion hazard whatsoever (LangGraph's own execution loop, not this
-adapter, is what actually re-enters the coordinator node).
+cycle back to the build root closed entirely by `handoff` edges (e.g.
+`writer -> coordinator`) is just another `transfer_to_coordinator` tool on
+`writer`, targeting a node that already exists in the same `StateGraph` --
+`Command(goto="coordinator", graph=Command.PARENT)` resolves it by name at
+run time with no construction-time recursion hazard whatsoever (LangGraph's
+own execution loop, not this adapter, is what actually re-enters the
+coordinator node). A cycle closed by `delegate` edges is a DIFFERENT story
+-- see "Recursive construction" above, and `_delegate_ancestors` below.
 
 Model routing -- LiteLLM "provider/model" strings map onto langchain's
 `init_chat_model` "provider:model" convention (verified via `inspect.
@@ -295,20 +355,50 @@ _PROVIDER_MAP = {
 class LangGraphAdapter(BaseAdapter):
     target = "langgraph"
 
-    def build(self, project: "Project", agent_name: str) -> CompiledStateGraph:
+    def build(
+        self,
+        project: "Project",
+        agent_name: str,
+        _delegate_ancestors: tuple[str, ...] = (),
+    ) -> CompiledStateGraph:
+        """Build `agent_name`. `_delegate_ancestors` is an internal-only
+        parameter (not part of `BaseAdapter`'s public contract) used when
+        this method recurses into a `delegate` destination's own build --
+        see module docstring, "Recursive construction".
+        """
+        if agent_name in _delegate_ancestors:
+            chain = " -> ".join((*_delegate_ancestors, agent_name))
+            raise ValueError(
+                f"commonadk: cycle detected in delegate edges reachable "
+                f"from the build root ({chain}). Each `delegate` edge "
+                f"recurses into an independent build of its destination "
+                f"(see langgraph_adapter.py's module docstring, 'Recursive "
+                f"construction'), which would recurse forever around this "
+                f"cycle rather than terminating."
+            )
         self._check_env(project, agent_name)
 
-        reachable = self._reachable_agents(project, agent_name)  # agent_name first
+        # Only handoff-reachable agents become nodes of this build's parent
+        # StateGraph -- a `delegate`-only destination is invoked as a
+        # standalone, independently-compiled sub-call (see module
+        # docstring, "Edge mapping" / "Recursive construction") and never
+        # becomes a sibling node here.
+        handoff_reachable = self._reachable_via(project, agent_name, {"handoff"})  # root first
 
-        nodes: dict[str, CompiledStateGraph] = {}
-        for name in reachable:
-            nodes[name] = self._build_agent_node(project, name)
+        nodes: dict[str, CompiledStateGraph] = {
+            name: self._build_agent_node(project, name, _delegate_ancestors)
+            for name in handoff_reachable
+        }
 
-        has_outgoing = any(edge.from_ == agent_name for edge in project.graph.edges)
-        if not has_outgoing:
+        has_outgoing_handoff = any(
+            edge.from_ == agent_name and edge.type == "handoff"
+            for edge in project.graph.edges
+        )
+        if not has_outgoing_handoff:
             # Nothing for the build root to hand off to -- its own compiled
-            # react agent IS the whole graph (see module docstring, "WHAT
-            # build() RETURNS").
+            # react agent (its own delegate tools already wired in by
+            # _build_agent_node) IS the whole graph (see module docstring,
+            # "WHAT build() RETURNS").
             return nodes[agent_name]
 
         builder: StateGraph = StateGraph(MessagesState)
@@ -319,24 +409,38 @@ class LangGraphAdapter(BaseAdapter):
 
     # -- per-agent node construction -----------------------------------
 
-    def _build_agent_node(self, project: "Project", name: str) -> CompiledStateGraph:
+    def _build_agent_node(
+        self, project: "Project", name: str, ancestors: tuple[str, ...]
+    ) -> CompiledStateGraph:
         spec = project.agents[name]
 
-        # One handoff tool per DISTINCT outgoing edge destination -- this is
-        # the per-edge targeting this target is documented to honor
-        # precisely (see module docstring, "Edge mapping"). `dict.fromkeys`
-        # dedupes while keeping first-seen order (a source can have two
-        # edges, e.g. one delegate and one handoff, to the same
-        # destination -- that must still produce exactly one tool, not a
-        # duplicate-named one).
-        destinations = dict.fromkeys(
-            edge.to for edge in project.graph.edges if edge.from_ == name
+        # One handoff tool per DISTINCT outgoing `handoff` edge destination
+        # -- this is the per-edge targeting this target is documented to
+        # honor precisely (see module docstring, "Edge mapping").
+        # `dict.fromkeys` dedupes while keeping first-seen order (a source
+        # can have two `handoff` edges to the same destination -- that must
+        # still produce exactly one tool, not a duplicate-named one).
+        handoff_destinations = dict.fromkeys(
+            edge.to for edge in project.graph.edges if edge.from_ == name and edge.type == "handoff"
         )
-        handoff_tools = [self._make_handoff_tool(dest) for dest in destinations]
+        handoff_tools = [self._make_handoff_tool(dest) for dest in handoff_destinations]
+
+        # One delegate tool per DISTINCT outgoing `delegate` edge
+        # destination -- see module docstring, "Edge mapping" / "Recursive
+        # construction". Each destination is a fresh, independent
+        # `build()` call, so cycles are guarded via `ancestors`.
+        delegate_destinations = dict.fromkeys(
+            edge.to for edge in project.graph.edges if edge.from_ == name and edge.type == "delegate"
+        )
+        child_ancestors = (*ancestors, name)
+        delegate_tools = [
+            self._make_delegate_tool(project, dest, child_ancestors)
+            for dest in delegate_destinations
+        ]
 
         return create_agent(
             self._model_for(project, spec),
-            tools=[t.func for t in spec.tools] + handoff_tools,
+            tools=[t.func for t in spec.tools] + handoff_tools + delegate_tools,
             system_prompt=spec.instructions,
             name=name,
         )
@@ -345,7 +449,8 @@ class LangGraphAdapter(BaseAdapter):
     def _make_handoff_tool(destination: str) -> Any:
         """Build a `transfer_to_<destination>` tool (see module docstring,
         "Handoff mechanism"): calling it returns a `Command` that jumps
-        execution to the `destination` node of the closest PARENT graph.
+        execution to the `destination` node of the closest PARENT graph --
+        CONTROL TRANSFERS and never returns to the calling node.
         """
         tool_name = f"transfer_to_{destination}"
 
@@ -369,6 +474,33 @@ class LangGraphAdapter(BaseAdapter):
             )
 
         return handoff_tool
+
+    def _make_delegate_tool(
+        self, project: "Project", destination: str, ancestors: tuple[str, ...]
+    ) -> Any:
+        """Build a `delegate_to_<destination>` tool (see module docstring,
+        "Edge mapping" / "Recursive construction"): calling it recurses
+        into an independent `build()` of `destination`, synchronously
+        invokes the resulting compiled graph to completion, and returns its
+        final message's text as this tool call's own result -- CONTROL
+        RETURNS to the calling node's own react loop right after, unlike
+        `_make_handoff_tool`'s `Command(..., graph=Command.PARENT)`.
+        """
+        dest_graph = self.build(project, destination, _delegate_ancestors=ancestors)
+        tool_name = f"delegate_to_{destination}"
+        description = (
+            f"Delegate a task to the '{destination}' agent and receive its "
+            f"result back into this conversation (unlike a handoff/"
+            f"transfer tool, control returns here afterward)."
+        )
+
+        @lc_tool(tool_name, description=description)
+        def delegate_tool(task: str) -> str:
+            result = dest_graph.invoke({"messages": [{"role": "user", "content": task}]})
+            final_message = result["messages"][-1]
+            return getattr(final_message, "content", str(final_message))
+
+        return delegate_tool
 
     # -- model routing ------------------------------------------------------
 

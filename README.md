@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="CommonADK — define agents once, build on any agent SDK" width="100%">
+  <img src="https://raw.githubusercontent.com/Mehul-Gupta-SMH/CommonADK/main/assets/banner.png" alt="CommonADK — define agents once, build on any agent SDK" width="100%">
 </p>
 
 # CommonADK
@@ -20,7 +20,7 @@ SDK. It does — [`examples/research-crew`](examples/research-crew) is proof.
 ## Demo
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Terminal recording of commonadk validate and examples/demo.py building the same common/ folder on all six SDK targets" width="100%">
+  <img src="https://raw.githubusercontent.com/Mehul-Gupta-SMH/CommonADK/main/assets/demo.gif" alt="Terminal recording of commonadk validate and examples/demo.py building the same common/ folder on all six SDK targets" width="100%">
 </p>
 
 Real, captured output — `commonadk validate` on the shipped `research-crew`

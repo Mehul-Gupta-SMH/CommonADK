@@ -95,6 +95,43 @@ the build root, is simply the same `Agent` instance appearing once (a cycle
 back to the root is a no-op, same as the other two flat-registry adapters --
 the root is never added to its own `agents`/`manager_agent` twice).
 
+Edge semantics (delegate/handoff distinction, issue #10's first checkbox) --
+KEEPS THE COLLAPSED V1 MAPPING, WITH REASONING: unlike LangGraph, Google
+ADK, OpenAI Agents, and AutoGen (each reworked for this feature to route
+`delegate` and `handoff` edges to two genuinely different SDK mechanisms),
+this adapter still maps BOTH edge types onto the one delegation mechanism
+described above. Investigated directly, not assumed: `crewai.tools.
+agent_tools` (crewai 1.15.16) ships exactly two coworker-facing tools,
+`DelegateWorkTool` and `AskQuestionTool` (`crewai/tools/agent_tools/
+agent_tools.py`, `AgentTools.tools()`), and BOTH are call-and-return by
+construction -- each `_run` resolves the named coworker and calls
+`self._execute(coworker, ...)`, which runs that coworker's own task to
+completion and returns its output as THIS tool call's result, with the
+delegating agent's own turn continuing right after (the same "runs a task,
+returns a result, caller's turn continues" shape as LangGraph's
+`delegate_to_<dest>` tool, Google ADK's `AgentTool`, OpenAI Agents'
+`as_tool()`, and AutoGen's `AgentTool`/`TeamTool`). Investigated for the
+other half of this project's distinction too: there is no CrewAI mechanism
+anywhere in this SDK for a `handoff`-style permanent control transfer that
+does NOT return to the caller (LangGraph's `Command(goto=..., graph=
+Command.PARENT)`, Google ADK's `sub_agents` + `transfer_to_agent`, OpenAI
+Agents' `handoffs` list, or AutoGen's `Swarm`-routed `handoffs`) -- a crew's
+process (`Process.sequential`/`Process.hierarchical`) governs TURN ORDER
+among crew members, not conversation ownership, and neither process exposes
+anything an agent itself can invoke to hand off control. So, exactly like
+the Claude Agent SDK adapter (see its own module docstring for the same
+reasoning in more detail): every edge this adapter builds, regardless of
+what `interactions.yaml` declares, already behaves like `delegate` (a
+sub-call that returns) at the SDK level, because that is the only shape
+CrewAI's own delegation tools have. Collapsing `handoff` onto the same
+mechanism as `delegate` therefore loses nothing further than what "Edge
+mapping" above already documents was lost (the crew-wide vs. per-edge
+coarsening) -- a `handoff` edge cannot be built "more transferred" than a
+`delegate` edge on this SDK, since neither can be built as a transfer at
+all. Per the issue's own carve-out ("targets that can't distinguish keep
+the collapsed mapping, documented"), that is exactly the situation here,
+stated plainly rather than papered over.
+
 AgentSpec mapping: `role=spec.name`, `goal=spec.config.description`,
 `backstory=spec.instructions` (the agent's `skill.md` content). This mirrors
 how the other adapters use these three fields (Google ADK: `name`/
@@ -115,7 +152,18 @@ other provider string -- either way the exact `"provider/model"` string
 expects, unchanged. This is the point of this target: there is NO
 unsupported-provider error here, unlike the Google ADK, OpenAI Agents, and
 Claude Agent SDK adapters, each of which special-cases one native provider
-and only reaches LiteLLM (or raises) for everything else. A per-target
+and only reaches LiteLLM (or raises) for everything else.
+
+That native path has a dependency consequence this docstring originally
+understated. Routing to a native client is not free: each one imports its
+own provider package, so `gemini/...` needs `google-genai` and
+`anthropic/...` needs `anthropic`, and without them `LLM(model=...)` raises
+ImportError (`crewai/llms/providers/gemini/completion.py`) before any call
+is made. The `litellm` extra does NOT cover these -- litellm never sees a
+call that crewai routes natively. This project's `crewai` extra therefore
+declares `crewai[litellm,google-genai,anthropic]`: litellm for the fallback
+path, the two provider packages for the native path the shipped example and
+every live smoke run actually take. See pyproject.toml's `crewai` extra. A per-target
 `targets.crewai.model` override in `agent-config.yaml` always wins and is
 passed through as-is to `LLM(model=...)`, exactly like every other adapter's
 override handling.

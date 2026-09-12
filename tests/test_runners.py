@@ -46,6 +46,27 @@ from commonadk.runners.pricing import estimate_cost_usd
 
 
 @pytest.fixture()
+def unported_target(monkeypatch):
+    """A target that is a real adapter target but has no runner.
+
+    Issue #22 ported all six, so `known_unported_targets()` is empty and
+    these tests would otherwise skip or -- worse -- loop over nothing and
+    pass vacuously. The state they cover is not hypothetical: issue #11
+    adds adapters, and an adapter can land before its runner does, which is
+    exactly when users meet this error path. So inject the state rather
+    than wait for it, pinning `google-adk` (a real, buildable target) as
+    unported for the duration of one test.
+    """
+    import commonadk.runners as runners_pkg
+
+    target = "google-adk"
+    monkeypatch.setitem(runners_pkg._REGISTRY, target, runners_pkg._REGISTRY[target])
+    monkeypatch.delitem(runners_pkg._REGISTRY, target)
+    monkeypatch.setattr(runners_pkg, "_UNPORTED_TARGETS", {target})
+    return target
+
+
+@pytest.fixture()
 def tavily_env(monkeypatch):
     """Satisfy researcher's one required env var -- mirrors
     tests/test_adapter_google.py's fixture of the same name."""
@@ -292,14 +313,18 @@ def test_get_runner_unknown_target_names_known_targets():
     assert "google-adk" in message
 
 
-def test_get_runner_unported_target_gives_clear_not_yet_available_message():
-    for target in known_unported_targets():
-        with pytest.raises(NotImplementedError) as exc_info:
-            get_runner(target)
-        message = str(exc_info.value)
-        assert target in message
-        assert "not available yet" in message
-        assert "google-adk" in message and "openai" in message
+def test_get_runner_unported_target_gives_clear_not_yet_available_message(
+    unported_target,
+):
+    import commonadk.runners as runners_pkg
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        runners_pkg.get_runner(unported_target)
+    message = str(exc_info.value)
+    assert unported_target in message
+    assert "not available yet" in message
+    # Names targets that DO have a runner, so the message is actionable.
+    assert "openai" in message
 
 
 def test_get_runner_missing_sdk_gives_install_hint(monkeypatch):
@@ -843,26 +868,31 @@ def test_cli_stream_prints_events_live(
 
 
 def test_cli_stream_on_unported_target_gives_clear_message(
-    example_common_dir, tavily_env, monkeypatch, capsys
+    example_common_dir, tavily_env, monkeypatch, capsys, unported_target
 ):
-    pytest.importorskip("claude_agent_sdk")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    # Picks whichever target is *currently* still unported rather than
+    # hardcoding one by name -- this path never builds/imports the target's
+    # SDK at all (the unported check in cli.py runs before that), so no
+    # env var or importorskip is needed for whichever target this resolves
+    # to; see docs/runner-design.md's per-SDK mapping table for targets not
+    # yet ported. Skips (not fails) once every real adapter target has a
+    # runner and there's no unported target left to exercise this path with.
+    target = unported_target
 
     rc = cli.main(
-        ["run", str(example_common_dir), "--target", "claude", "--stream", "hi"]
+        ["run", str(example_common_dir), "--target", target, "--stream", "hi"]
     )
 
     assert rc != 0
     err = capsys.readouterr().err
-    assert "claude" in err
+    assert target in err
     assert "does not have one yet" in err
 
 
 def test_cli_trace_on_unported_target_gives_clear_message(
-    example_common_dir, tavily_env, monkeypatch, capsys, tmp_path
+    example_common_dir, tavily_env, monkeypatch, capsys, tmp_path, unported_target
 ):
-    pytest.importorskip("claude_agent_sdk")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    target = unported_target
     trace_path = tmp_path / "trace.json"
 
     rc = cli.main(
@@ -870,7 +900,7 @@ def test_cli_trace_on_unported_target_gives_clear_message(
             "run",
             str(example_common_dir),
             "--target",
-            "claude",
+            target,
             "--trace",
             str(trace_path),
             "hi",
@@ -880,7 +910,7 @@ def test_cli_trace_on_unported_target_gives_clear_message(
     assert rc != 0
     assert not trace_path.exists()
     err = capsys.readouterr().err
-    assert "claude" in err
+    assert target in err
 
 
 def test_cli_run_without_stream_or_trace_still_just_prints_final_text_on_unported_target(

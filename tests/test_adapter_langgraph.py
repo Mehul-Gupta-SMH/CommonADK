@@ -29,6 +29,9 @@ stay green either way.
 
 from __future__ import annotations
 
+import inspect
+from typing import Any
+
 import yaml
 import pytest
 
@@ -40,6 +43,7 @@ from langchain_anthropic import ChatAnthropic  # noqa: E402
 from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
+from langgraph.types import Command  # noqa: E402
 
 from commonadk.adapters.langgraph_adapter import LangGraphAdapter  # noqa: E402
 
@@ -72,16 +76,27 @@ def provider_keys_env(monkeypatch):
 
 @pytest.fixture()
 def multi_parent_project(tmp_project, tavily_env, provider_keys_env):
-    """The example, with a `coordinator -> writer` delegate edge added back
-    on top of its shipped `coordinator -> researcher -> writer` tree, so
-    `writer` becomes reachable from two parents. Must BUILD SUCCESSFULLY --
-    every reachable agent is built once into a flat `dict[str,
-    CompiledStateGraph]` keyed by name, so a name reachable by two paths is
-    simply the same node referenced by two different handoff tools.
+    """All three edges rewritten to `handoff` (`coordinator -> researcher ->
+    writer` plus a direct `coordinator -> writer`), so `writer` is
+    `handoff`-reachable from two parents within the SAME parent StateGraph.
+    Must BUILD SUCCESSFULLY -- every handoff-reachable agent is built once
+    into a flat `dict[str, CompiledStateGraph]` keyed by name, so a name
+    reachable by two paths is simply the same node referenced by two
+    different handoff tools.
+
+    Since issue #10 (delegate/handoff distinction): only `handoff` edges
+    join this shared parent StateGraph -- a `delegate` edge to the same
+    destination would instead recurse into a SEPARATE, independent build
+    (see `test_delegate_edge_to_a_handoff_reachable_destination_builds_
+    independently` below, which exercises exactly that non-sharing).
     """
     interactions_path = tmp_project / "interactions.yaml"
     data = yaml.safe_load(interactions_path.read_text())
-    data["edges"].append({"from": "coordinator", "to": "writer", "type": "delegate"})
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "handoff"},
+        {"from": "researcher", "to": "writer", "type": "handoff"},
+        {"from": "coordinator", "to": "writer", "type": "handoff"},
+    ]
     interactions_path.write_text(yaml.safe_dump(data))
     return commonadk.load(tmp_project)
 
@@ -89,19 +104,33 @@ def multi_parent_project(tmp_project, tavily_env, provider_keys_env):
 @pytest.fixture()
 def cyclic_project(tmp_project, tavily_env, provider_keys_env):
     """A cycle in the reachable graph (writer -> coordinator, closing the
-    loop). Must BUILD SUCCESSFULLY -- a handoff tool targeting an already-
-    registered node name is resolved by `Command(goto=..., graph=Command.
-    PARENT)` at run time, not a construction-time hazard.
+    loop), all edges `handoff`. Must BUILD SUCCESSFULLY -- a handoff tool
+    targeting an already-registered node name is resolved by
+    `Command(goto=..., graph=Command.PARENT)` at run time, not a
+    construction-time hazard. (A cycle closed by `delegate` edges instead
+    IS a construction-time hazard now -- see `test_delegate_cycle_is_
+    rejected` below.)
     """
     interactions_path = tmp_project / "interactions.yaml"
     data = yaml.safe_load(interactions_path.read_text())
     data["edges"] = [
-        {"from": "coordinator", "to": "researcher", "type": "delegate"},
+        {"from": "coordinator", "to": "researcher", "type": "handoff"},
         {"from": "researcher", "to": "writer", "type": "handoff"},
         {"from": "writer", "to": "coordinator", "type": "handoff"},
     ]
     interactions_path.write_text(yaml.safe_dump(data))
     return commonadk.load(tmp_project)
+
+
+def _delegate_dest_graph(tool: Any) -> CompiledStateGraph:
+    """Reach into a `delegate_to_<dest>` tool's closure to get the
+    independent `CompiledStateGraph` it wraps (see langgraph_adapter.py's
+    `_make_delegate_tool`) -- there is no public accessor for a plain
+    closured tool function's captured variables, so this mirrors how this
+    file already reaches into `ToolNode.tools_by_name` and
+    `graph.get_subgraphs()` for other SDK internals with no cleaner surface.
+    """
+    return inspect.getclosurevars(tool.func).nonlocals["dest_graph"]
 
 
 # ---------------------------------------------------------------------------
@@ -135,27 +164,40 @@ def _subgraph(graph: CompiledStateGraph, name: str) -> CompiledStateGraph:
 
 def test_coordinator_build_happy_path_on_example(example_common_dir, tavily_env, provider_keys_env):
     """The shipped research-crew example -- coordinator -delegate->
-    researcher -handoff-> writer -- has an outgoing edge at the build root,
-    so this must build a compiled multi-agent StateGraph with one node per
-    reachable agent, each carrying exactly the handoff tool(s) its own
-    outgoing edges call for (see module docstring, "Edge mapping" -- LangGraph
-    is the one target that honors edge *targets* precisely).
+    researcher -handoff-> writer.
+
+    Since issue #10 (delegate/handoff distinction): coordinator's only edge
+    is `delegate`, and it has no *handoff* edges of its own, so `build()`
+    must return coordinator's OWN bare compiled react agent (not a
+    multi-node StateGraph) -- see module docstring, "WHAT build()
+    RETURNS". researcher is reached through a `delegate_to_researcher`
+    tool wrapping an entirely independent, recursively-built graph.
+    researcher itself hands off to writer, so THAT recursive build must be
+    a genuine 3-node-minus-start multi-agent StateGraph (researcher +
+    writer), exactly as if `researcher` had been built directly as its own
+    top-level target (see module docstring, "Recursive construction" --
+    this is the same graph `test_researcher_build_wires_writer_as_only_
+    other_node` below builds by calling `build("researcher", ...)`
+    directly).
     """
     project = commonadk.load(example_common_dir)
     graph = project.build("coordinator", target="langgraph")
 
     assert isinstance(graph, CompiledStateGraph)
-    assert set(graph.nodes.keys()) == {"__start__", "coordinator", "researcher", "writer"}
+    assert set(graph.nodes.keys()) == {"__start__", "model", "tools"}  # bare react agent
+    assert "coordinator" not in graph.nodes
 
-    coordinator = _subgraph(graph, "coordinator")
-    researcher = _subgraph(graph, "researcher")
-    writer = _subgraph(graph, "writer")
+    tool_names = _tool_names(graph)
+    assert {"split_into_subtopics", "format_handoff_note", "delegate_to_researcher"} == tool_names
+    assert not any(name.startswith("transfer_to_") for name in tool_names)
 
-    assert _tool_names(coordinator) == {
-        "split_into_subtopics",
-        "format_handoff_note",
-        "transfer_to_researcher",
-    }
+    delegate_tool = graph.nodes["tools"].node.steps[0].tools_by_name["delegate_to_researcher"]
+    researcher_graph = _delegate_dest_graph(delegate_tool)
+
+    assert set(researcher_graph.nodes.keys()) == {"__start__", "researcher", "writer"}
+    researcher = _subgraph(researcher_graph, "researcher")
+    writer = _subgraph(researcher_graph, "writer")
+
     assert _tool_names(researcher) == {
         "search_web",
         "fetch_page",
@@ -197,9 +239,10 @@ def test_writer_build_returns_bare_react_agent_not_a_multi_agent_graph(
 
 
 def test_multi_parent_graph_builds_with_one_shared_node(multi_parent_project):
-    """KEY PROPERTY: a multi-parent graph builds successfully, `writer`
-    appears exactly once as a node, and `coordinator` gets a handoff tool
-    for EACH of its two distinct outgoing edges.
+    """KEY PROPERTY: a multi-parent graph (all `handoff` edges -- see
+    `multi_parent_project`) builds successfully, `writer` appears exactly
+    once as a node, and `coordinator` gets a handoff tool for EACH of its
+    two distinct outgoing edges.
     """
     graph = multi_parent_project.build("coordinator", target="langgraph")
 
@@ -209,15 +252,128 @@ def test_multi_parent_graph_builds_with_one_shared_node(multi_parent_project):
 
 
 def test_cyclic_graph_builds_without_recursion_hazard(cyclic_project):
-    """KEY PROPERTY: a cycle back to the build root builds successfully --
-    `writer` gets a `transfer_to_coordinator` handoff tool targeting a node
-    that already exists in the same StateGraph.
+    """KEY PROPERTY: a cycle back to the build root, closed entirely by
+    `handoff` edges (see `cyclic_project`), builds successfully -- `writer`
+    gets a `transfer_to_coordinator` handoff tool targeting a node that
+    already exists in the same StateGraph.
     """
     graph = cyclic_project.build("coordinator", target="langgraph")
 
     assert set(graph.nodes.keys()) == {"__start__", "coordinator", "researcher", "writer"}
     writer = _subgraph(graph, "writer")
     assert "transfer_to_coordinator" in _tool_names(writer)
+
+
+# ---------------------------------------------------------------------------
+# delegate/handoff distinction (issue #10, first checkbox)
+# ---------------------------------------------------------------------------
+
+
+def test_delegate_tool_invoke_returns_control_to_caller(tmp_project, tavily_env, provider_keys_env):
+    """A `delegate` edge's tool must wrap a `Command`-free, plain
+    `.invoke()` call: calling the destination graph directly must return an
+    ordinary result dict (control returns), never a `Command` object (see
+    module docstring, "Edge mapping" -- the structural mirror of
+    `_make_handoff_tool`'s `Command(..., graph=Command.PARENT)`).
+    """
+    project = commonadk.load(tmp_project)  # unmodified: coordinator -delegate-> researcher
+    graph = project.build("coordinator", target="langgraph")
+
+    delegate_tool = graph.nodes["tools"].node.steps[0].tools_by_name["delegate_to_researcher"]
+    dest_graph = _delegate_dest_graph(delegate_tool)
+    assert isinstance(dest_graph, CompiledStateGraph)
+    assert not isinstance(dest_graph, Command)
+
+
+def test_handoff_edge_stays_a_sibling_node_not_a_delegate_tool(tmp_project, tavily_env, provider_keys_env):
+    """A `handoff` edge from researcher -> writer must produce a
+    `transfer_to_writer` tool and a `writer` sibling NODE -- never a
+    `delegate_to_writer` tool."""
+    project = commonadk.load(tmp_project)  # unmodified: researcher -handoff-> writer
+    graph = project.build("researcher", target="langgraph")
+
+    assert set(graph.nodes.keys()) == {"__start__", "researcher", "writer"}
+    researcher = _subgraph(graph, "researcher")
+    tool_names = _tool_names(researcher)
+    assert "transfer_to_writer" in tool_names
+    assert "delegate_to_writer" not in tool_names
+
+
+def test_mixed_edges_from_same_source_split_correctly(tmp_project, tavily_env, provider_keys_env):
+    """A source with one delegate edge and one handoff edge (to different
+    destinations) must split them correctly: one becomes a delegate tool
+    wrapping an independent build, the other a handoff tool targeting a
+    sibling node -- neither mechanism swallows the other.
+    """
+    interactions_path = tmp_project / "interactions.yaml"
+    data = yaml.safe_load(interactions_path.read_text())
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "delegate"},
+        {"from": "coordinator", "to": "writer", "type": "handoff"},
+    ]
+    interactions_path.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    graph = project.build("coordinator", target="langgraph")
+
+    assert set(graph.nodes.keys()) == {"__start__", "coordinator", "writer"}  # NOT researcher
+    coordinator = _subgraph(graph, "coordinator")
+    tool_names = _tool_names(coordinator)
+    assert "transfer_to_writer" in tool_names
+    assert "delegate_to_researcher" in tool_names
+
+
+def test_delegate_edge_to_a_handoff_reachable_destination_builds_independently(
+    tmp_project, tavily_env, provider_keys_env
+):
+    """A `delegate` edge to a destination that is ALSO reachable via
+    `handoff` from elsewhere gets its OWN independent build -- it is NOT
+    deduped against the handoff-reachable StateGraph's node (unlike
+    `test_multi_parent_graph_builds_with_one_shared_node`'s all-`handoff`
+    graph, where the shared destination genuinely is the same node). See
+    module docstring, "Recursive construction".
+    """
+    interactions_path = tmp_project / "interactions.yaml"
+    data = yaml.safe_load(interactions_path.read_text())
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "handoff"},
+        {"from": "researcher", "to": "writer", "type": "handoff"},
+        {"from": "coordinator", "to": "writer", "type": "delegate"},
+    ]
+    interactions_path.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    graph = project.build("coordinator", target="langgraph")
+
+    # `writer` IS a handoff-reachable sibling node (via researcher)...
+    assert set(graph.nodes.keys()) == {"__start__", "coordinator", "researcher", "writer"}
+    coordinator = _subgraph(graph, "coordinator")
+    assert "transfer_to_researcher" in _tool_names(coordinator)
+
+    # ...AND ALSO gets its own, entirely separate, independently-built
+    # graph behind coordinator's delegate_to_writer tool.
+    delegate_tool = coordinator.nodes["tools"].node.steps[0].tools_by_name["delegate_to_writer"]
+    independent_writer_graph = _delegate_dest_graph(delegate_tool)
+    assert set(independent_writer_graph.nodes.keys()) == {"__start__", "model", "tools"}
+    assert independent_writer_graph is not graph  # a separate compiled graph entirely
+
+
+def test_delegate_cycle_is_rejected(tmp_project, tavily_env, provider_keys_env):
+    """A cycle closed entirely by `delegate` edges must raise a clear error
+    at build time rather than recursing forever -- see module docstring,
+    "Recursive construction".
+    """
+    interactions_path = tmp_project / "interactions.yaml"
+    data = yaml.safe_load(interactions_path.read_text())
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "delegate"},
+        {"from": "researcher", "to": "coordinator", "type": "delegate"},
+    ]
+    interactions_path.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    with pytest.raises(ValueError, match="cycle"):
+        project.build("coordinator", target="langgraph")
 
 
 def test_duplicate_edges_to_same_destination_yield_one_handoff_tool(tmp_project, tavily_env, provider_keys_env):

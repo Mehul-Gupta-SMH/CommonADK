@@ -33,18 +33,32 @@ def tavily_env(monkeypatch):
 
 @pytest.fixture()
 def multi_parent_project(tmp_project, tavily_env):
-    """The example, with a `coordinator -> writer` delegate edge added back
-    on top of its shipped `coordinator -> researcher -> writer` tree, so
-    `writer` becomes reachable from two parents again. `tmp_project` is a
-    fresh copy of the shipped (now clean-tree) example -- kept as an
+    """All three edges rewritten to `handoff` (`coordinator -> researcher ->
+    writer` plus a direct `coordinator -> writer`), so `writer` is
+    `handoff`-reachable from two parents within the SAME sub_agents tree.
+    `tmp_project` is a fresh copy of the shipped example -- kept as an
     in-test fixture purely to exercise the multi-parent rejection path,
     since the shipped example itself must build cleanly (plan.md v1
     intersection rule / M3 hypothesis test: the same `common/` folder has to
     run unmodified on Google ADK).
+
+    Since issue #10 (delegate/handoff distinction): only `handoff` edges
+    join the sub_agents tree this constraint is about, and only within one
+    continuous handoff-reachable scope -- if `coordinator -> researcher`
+    stayed `delegate` (as shipped), `researcher` would be built as its own
+    independent `AgentTool` subtree with fresh tree-tracking state, and the
+    two paths to `writer` would never actually collide (see
+    `test_delegate_edge_bypasses_the_sub_agents_tree_constraint` below,
+    which exercises exactly that non-conflict). All three edges are
+    `handoff` here so the conflict is genuine.
     """
     interactions_path = tmp_project / "interactions.yaml"
     data = yaml.safe_load(interactions_path.read_text())
-    data["edges"].append({"from": "coordinator", "to": "writer", "type": "delegate"})
+    data["edges"] = [
+        {"from": "coordinator", "to": "researcher", "type": "handoff"},
+        {"from": "researcher", "to": "writer", "type": "handoff"},
+        {"from": "coordinator", "to": "writer", "type": "handoff"},
+    ]
     interactions_path.write_text(yaml.safe_dump(data))
     return commonadk.load(tmp_project)
 
@@ -55,20 +69,30 @@ def multi_parent_project(tmp_project, tavily_env):
 
 
 def test_coordinator_build_happy_path_on_example(example_common_dir, tavily_env):
-    """The shipped research-crew example is a clean tree --
-    coordinator -delegate-> researcher -handoff-> writer, with no direct
-    coordinator -> writer edge -- so it must build end-to-end unmodified.
-    This is the M3 hypothesis test's entry point: the same `common/` folder
-    has to build cleanly on every v1 target.
+    """The shipped research-crew example -- coordinator -delegate->
+    researcher -handoff-> writer -- must build end-to-end unmodified. This
+    is the M3 hypothesis test's entry point: the same `common/` folder has
+    to build cleanly on every v1 target.
+
+    Since issue #10 (delegate/handoff distinction): coordinator's only edge
+    is `delegate`, so coordinator.sub_agents must be EMPTY and researcher
+    must instead be reachable through an `AgentTool` in coordinator.tools.
+    researcher -> writer is still `handoff`, so writer stays a genuine
+    sub_agent of researcher, unchanged.
     """
+    from google.adk.tools import AgentTool
+
     project = commonadk.load(example_common_dir)
     agent = project.build("coordinator", target="google-adk")
 
     assert agent.name == "coordinator"
     assert agent.instruction.strip() != ""
-    assert [a.name for a in agent.sub_agents] == ["researcher"]
+    assert agent.sub_agents == []  # coordinator has no handoff edges
 
-    researcher = agent.sub_agents[0]
+    researcher_tools = [t for t in agent.tools if isinstance(t, AgentTool)]
+    assert [t.agent.name for t in researcher_tools] == ["researcher"]
+    researcher = researcher_tools[0].agent
+
     assert researcher.instruction.strip() != ""
     assert [a.name for a in researcher.sub_agents] == ["writer"]
 
@@ -89,6 +113,59 @@ def test_researcher_build_is_a_clean_tree(example_common_dir, tavily_env):
     assert agent.instruction.strip() != ""
     assert [a.name for a in agent.sub_agents] == ["writer"]
     assert agent.sub_agents[0].instruction.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# delegate/handoff distinction (issue #10, first checkbox)
+# ---------------------------------------------------------------------------
+
+
+def test_delegate_edge_becomes_agent_tool_not_sub_agent(example_common_dir, tavily_env):
+    """A `delegate` edge must produce an `AgentTool` in the source's `tools`
+    list, never an entry in `sub_agents`."""
+    from google.adk.tools import AgentTool
+
+    project = commonadk.load(example_common_dir)
+    agent = project.build("coordinator", target="google-adk")  # -delegate-> researcher
+
+    assert agent.sub_agents == []
+    assert any(isinstance(t, AgentTool) and t.agent.name == "researcher" for t in agent.tools)
+
+
+def test_handoff_edge_becomes_sub_agent_not_agent_tool(example_common_dir, tavily_env):
+    """A `handoff` edge must produce a `sub_agents` entry, never an
+    `AgentTool` in `tools`."""
+    from google.adk.tools import AgentTool
+
+    project = commonadk.load(example_common_dir)
+    agent = project.build("researcher", target="google-adk")  # -handoff-> writer
+
+    assert [a.name for a in agent.sub_agents] == ["writer"]
+    assert not any(isinstance(t, AgentTool) for t in agent.tools)
+
+
+def test_delegate_edge_bypasses_the_sub_agents_tree_constraint(tmp_project, tavily_env):
+    """Unlike a `handoff` edge (test_multi_parent_graph_is_rejected below),
+    a `delegate` edge reaching an already-handoff-claimed destination must
+    NOT be rejected: `writer` is already researcher's `handoff` sub_agent,
+    and adding a `coordinator -> writer` DELEGATE edge on top must build
+    successfully, wrapping a second, independent `writer` Agent instance in
+    an AgentTool on coordinator -- no shared `parent_agent` state to
+    conflict over (see module docstring, "Edge semantics").
+    """
+    from google.adk.tools import AgentTool
+
+    interactions_path = tmp_project / "interactions.yaml"
+    data = yaml.safe_load(interactions_path.read_text())
+    data["edges"].append({"from": "coordinator", "to": "writer", "type": "delegate"})
+    interactions_path.write_text(yaml.safe_dump(data))
+    project = commonadk.load(tmp_project)
+
+    agent = project.build("coordinator", target="google-adk")  # must not raise
+
+    delegate_targets = {t.agent.name for t in agent.tools if isinstance(t, AgentTool)}
+    assert delegate_targets == {"researcher", "writer"}
+    assert agent.sub_agents == []
 
 
 def test_multi_parent_graph_is_rejected(multi_parent_project):

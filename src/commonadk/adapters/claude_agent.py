@@ -87,6 +87,41 @@ path that cycles back to the build root, is simply the same dict entry
 visited twice; the build root itself is excluded from `options.agents` (it
 *is* `options`), so a cycle back to it is a no-op.
 
+Edge semantics (delegate/handoff distinction, issue #10's first checkbox) --
+KEEPS THE COLLAPSED V1 MAPPING, WITH REASONING: unlike LangGraph, Google
+ADK, OpenAI Agents, and AutoGen (each reworked for this feature to route
+`delegate` and `handoff` edges to two genuinely different SDK mechanisms),
+this adapter still maps BOTH edge types onto the one mechanism described
+above (the "Agent" tool's `subagent_type` dispatch into the flat
+`options.agents` registry). This is not a shortcut taken for lack of time
+-- it reflects a real property of the installed SDK, investigated
+directly: per the SDK's own subagent documentation (https://code.claude.
+com/docs/en/agent-sdk/subagents) and its `AgentDefinition`/session model,
+invoking a subagent through the Agent tool is STRUCTURALLY A SUB-CALL, not
+a conversation transfer -- the subagent runs in its own isolated context,
+produces a final report, and that report is returned to the INVOKING
+agent's own turn, which then continues (the same "runs a task, returns a
+result, caller's turn continues" shape as LangGraph's `delegate_to_<dest>`
+tool, Google ADK's `AgentTool`, OpenAI Agents' `as_tool()`, and AutoGen's
+`AgentTool`/`TeamTool` above). There is no SDK-level primitive anywhere in
+`claude_agent_sdk.types` for the OTHER half of this project's distinction
+-- a `handoff`-style permanent control transfer that does NOT return to the
+caller (LangGraph's `Command(goto=..., graph=Command.PARENT)`, Google ADK's
+`sub_agents` + `transfer_to_agent`, OpenAI Agents' `handoffs` list, or
+AutoGen's `Swarm`-routed `handoffs`) -- verified by the absence of any such
+field or documented mechanism, not merely by not having found one. So this
+adapter is not really choosing an arbitrary midpoint between the two
+semantics: EVERY edge this adapter builds, regardless of what
+`interactions.yaml` declares, already behaves like `delegate` (a sub-call
+that returns) at the SDK level, because that is the only shape subagent
+dispatch has here. Collapsing `handoff` onto the same mechanism as
+`delegate` therefore loses nothing further than what was already lost the
+moment an edge reaches this target -- a `handoff` edge cannot be built
+"more transferred" than a `delegate` edge on this SDK, since neither can be
+built as a transfer at all. Per the issue's own carve-out ("targets that
+can't distinguish keep the collapsed mapping, documented"), that is exactly
+the situation here, stated plainly rather than papered over.
+
 Model routing: Anthropic-native only -- there is no LiteLLM path in this
 SDK (`ClaudeAgentOptions.model` / `AgentDefinition.model` take a bare Claude
 model id or alias such as `"sonnet"`/`"opus"`/`"haiku"`/`"inherit"`, per

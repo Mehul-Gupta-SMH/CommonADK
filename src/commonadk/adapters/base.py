@@ -61,7 +61,30 @@ class BaseAdapter(ABC):
             )
 
     def _reachable_agents(self, project: "Project", start: str) -> list[str]:
-        """Every agent name reachable from `start` (via edges), including `start`."""
+        """Every agent name reachable from `start` via ANY edge (delegate or
+        handoff), including `start`. A thin wrapper over `_reachable_via`
+        with both edge types allowed -- kept as its own method since it is
+        the traversal every adapter's env preflight and flat-registry
+        construction has always used, unaffected by the delegate/handoff
+        distinction (issue #10): an agent's required env vars matter
+        whether it's reached by a call-and-return or a control transfer.
+        """
+        return self._reachable_via(project, start, {"delegate", "handoff"})
+
+    def _reachable_via(
+        self, project: "Project", start: str, edge_types: "set[str]"
+    ) -> list[str]:
+        """Every agent name reachable from `start`, including `start`,
+        following only edges whose `type` is in `edge_types`.
+
+        Added for issue #10 (honor the delegate/handoff distinction): an
+        adapter that builds a different SDK-native structure for the two
+        edge types (e.g. AutoGen's `Swarm` participants, which must only be
+        `handoff`-reachable agents, never `delegate`-only destinations
+        that are wired in as `AgentTool`s instead) calls this with just the
+        one edge type it cares about, rather than filtering
+        `_reachable_agents`'s all-edges result after the fact.
+        """
         seen = [start]
         seen_set = {start}
         i = 0
@@ -69,7 +92,7 @@ class BaseAdapter(ABC):
             current = seen[i]
             i += 1
             for edge in project.graph.edges:
-                if edge.from_ == current and edge.to not in seen_set:
+                if edge.from_ == current and edge.type in edge_types and edge.to not in seen_set:
                     seen_set.add(edge.to)
                     seen.append(edge.to)
         return seen
