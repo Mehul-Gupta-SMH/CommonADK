@@ -15,7 +15,7 @@ map. [`plan.md`](plan.md) holds the original design plan and milestone record;
 | M4 | CLI: `commonadk validate | render | run | --version` |
 | — | Cross-target hypothesis test (one `Project`, six builds), full docs, offline demo |
 | #6 | CI: core job, a matrix leg per SDK extra, and a non-blocking all-extras job |
-| #7 | **Released on PyPI** — `pip install commonadk` (v0.0.1), published by the tag-triggered workflow |
+| #7 | **Released on PyPI** — `pip install commonadk`, published by the tag-triggered workflow. v0.0.2 fixes a real packaging bug: the `crewai` extra under-declared CrewAI's native provider packages, so `commonadk[crewai]` raised ImportError on gemini and anthropic models in v0.0.1. See [CHANGELOG.md](CHANGELOG.md) |
 | #9 | Mixed-target spawning foundation: `runtime:` honored in-process, native per-runtime islands, cross-runtime edges bridged by plain callables ([design](docs/mixed-target-design.md)) |
 | #12 | Broader `model_params` per adapter (per-provider maps where SDKs need them), the `commonadk new <agent>` scaffolding command, and the standing dependency-pin watch — all eight neutral params re-verified against installed SDK source |
 | [#22](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/22) | **Execution and telemetry layer** — a real runner for **all six targets**, with normalized per-step events, token/cost meters and observe-only hooks. Usage is reported honestly or not at all: a gap is `null` with `usage_complete: false`, never a `0` that would read as a free call. Claude takes cost from the SDK's own figure rather than a static table; CrewAI reports genuine per-call usage off its event bus ([design](docs/runner-design.md)) |
