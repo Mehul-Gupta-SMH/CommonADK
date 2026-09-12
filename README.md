@@ -31,7 +31,7 @@ transcripts in [`docs/demo-runs.md`](docs/demo-runs.md).
 
 ## Quickstart
 
-`commonadk` is on PyPI from v0.0.1: `pip install commonadk` gets you the
+`commonadk` is on PyPI: `pip install commonadk` gets you the
 core (loader, validator, mermaid renderer, CLI) with no agent SDK attached.
 Install with the extra(s) for the SDK(s) you want to build against:
 
@@ -71,7 +71,7 @@ agent = project.build("coordinator", target="google-adk")   # live google.adk.Ag
 agent = project.build("coordinator", target="openai")       # live agents.Agent
 options = project.build("coordinator", target="claude")     # claude_agent_sdk.ClaudeAgentOptions
 crew = project.build("coordinator", target="crewai")         # live crewai.Crew
-team = project.build("coordinator", target="autogen")        # live autogen_agentchat.teams.Swarm
+agent = project.build("coordinator", target="autogen")       # AssistantAgent here; Swarm if the root has handoff edges
 graph = project.build("coordinator", target="langgraph")     # compiled langgraph.graph.StateGraph
 ```
 
@@ -262,9 +262,13 @@ rejected up front). The OpenAI Agents SDK's `handoffs` are a plain list of
 `handoffs` list, and cycles are just references wired up after construction.
 So the identical `interactions.yaml` — including graphs with a shared
 sub-agent or even a cycle — builds happily as an OpenAI Agents handoff graph
-while the same shape can be legitimately rejected for Google ADK. (v1 does
-not yet distinguish `delegate` from `handoff` *within* either adapter — both
-edge types map to the one mechanism each SDK exposes today.)
+while the same shape can be legitimately rejected for Google ADK. Since
+v0.0.2 both adapters also distinguish `delegate` from `handoff` *within*
+themselves: Google ADK maps `delegate` to an `AgentTool` invocation that
+returns and `handoff` to a `sub_agents` transfer that does not, and the
+OpenAI Agents SDK maps `delegate` to `as_tool()` and `handoff` to its
+`handoffs` list. A `delegate` edge is exempt from the one-parent tree
+constraint on Google ADK, because `AgentTool` never sets a parent.
 
 The Claude Agent SDK is session/query-based, not agent-object-based: instead
 of a live agent, `project.build(..., target="claude")` returns a
@@ -304,13 +308,20 @@ honored **precisely**, not coarsened — the opposite end of the spectrum from
 CrewAI above: `project.build(..., target="langgraph")` gives each reachable
 agent a prebuilt react-agent node (`langchain.agents.create_agent`) in one
 compiled `langgraph.graph.StateGraph`, and for every outgoing
-`interactions.yaml` edge it adds exactly one clearly-named handoff tool
-(`transfer_to_<destination>`) to the *source* agent — an agent can reach
-only the destinations the graph actually names, nothing more. Both
-`delegate` and `handoff` edges map to this one mechanism (the same v1
-intersection decision every other adapter makes). The handoff itself uses
-LangGraph's own `Command(goto=<destination>, graph=Command.PARENT)`
-primitive — no `langgraph-supervisor`/`langgraph-swarm` dependency needed.
+`interactions.yaml` edge it adds exactly one clearly-named tool to the
+*source* agent — an agent can reach only the destinations the graph
+actually names, nothing more. Since v0.0.2 the two edge types get genuinely
+different tools: a `handoff` edge adds `transfer_to_<destination>`, which
+returns LangGraph's own `Command(goto=<destination>, graph=Command.PARENT)`
+so control transfers and does not come back, while a `delegate` edge adds
+`delegate_to_<destination>`, which invokes an independently built graph for
+the destination and returns its result to the caller. Neither needs a
+`langgraph-supervisor`/`langgraph-swarm` dependency.
+
+One consequence worth knowing: a build root whose only outgoing edges are
+delegates is no longer wrapped in a multi-node graph at all — it comes back
+as a bare, directly runnable agent, since the wrapper only ever encoded
+handoff. The same is true of AutoGen and its `Swarm`.
 Multi-parent graphs and cycles need no special handling: every reachable
 agent is built once into a flat, name-keyed node registry, so a shared
 destination or a cycle back to the build root is just another named handoff
@@ -404,15 +415,20 @@ hooks.register(lambda event: print(event.kind, event.seq))
 runner.run_sync(project, "coordinator", "hi", hooks=hooks)
 ```
 
-`claude`, `crewai`, `autogen`, and `langgraph` don't have a runner yet —
-`commonadk run` for those targets works exactly as it always has (no
-`--stream`/`--trace`; those two flags give a clear error naming which
-targets do support them, rather than a silent no-op). See
-[`docs/runner-design.md`](docs/runner-design.md) for the full design: the
-normalized event model, the per-SDK mapping (including exactly where
-token/cost data is and isn't available), the session model, the hook
-contract, and precisely how each of the four remaining SDKs will map when
-they're built.
+All six targets have a runner as of v0.0.2, so `--stream` and `--trace`
+work everywhere. Should an adapter ever land before its runner does, those
+two flags give a clear error naming which targets do support them, rather
+than a silent no-op. See [`docs/runner-design.md`](docs/runner-design.md)
+for the full design: the normalized event model, the per-SDK mapping
+(including exactly where token/cost data is and isn't available), the
+session model, and the hook contract.
+
+What each SDK reports differs, and the traces say so rather than papering
+over it. The Claude Agent SDK computes its own cost, so that runner uses
+the SDK's figure instead of the static price table. CrewAI reports genuine
+per-call usage from its event bus. Where an SDK reports nothing, the trace
+carries `null` with `usage_complete: false` — never a `0`, which would read
+as a call that was free.
 
 ## Verified live runs
 
