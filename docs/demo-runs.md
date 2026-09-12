@@ -277,12 +277,67 @@ evaluated false there), installs all six SDK extras, runs the script,
 writes the summary table to the job's `$GITHUB_STEP_SUMMARY`, and uploads
 the JSON report plus every per-target trace file as a build artifact.
 
+**Live run #6 — 2026-09-12: all six targets green, and four of them report
+real token/cost for the first time.** [GitHub Actions run
+#6](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34691962910),
+`workflow_dispatch` on `main` at commit `fd01be3` (the #26 merge), model
+`claude-haiku-4-5`, all six targets, `dry_run: false`. **This is the
+current reference result.**
+
+```
+target       status       wall_s   tokens   cost_usd  final_text
+----------------------------------------------------------------
+google-adk   success        7.99     1716   0.002012  That text has 9 words.
+openai       success        2.02        ?          ?  That text has 9 words.
+claude       success        3.43     2565   0.003521  That text has 9 words.
+crewai       success       26.25     1788   0.002084  That text has 9 words.
+autogen      success        1.15      820   0.001072  9
+langgraph    success        2.01     1634   0.001930  That text has 9 words.
+```
+
+This is the run that proves the execution/telemetry layer
+([#22](https://github.com/Mehul-Gupta-SMH/CommonADK/issues/22)) against
+real APIs rather than stubs. Compare the `tokens`/`cost_usd` columns with
+run #5 below, where `claude`, `crewai`, `autogen` and `langgraph` all read
+`-` — meaning "no runner exists for this target, so nothing was measured".
+Each now drives a real runner and reports genuine usage, and the run
+emitted **six** per-target trace files where run #5 emitted two.
+
+What to read carefully here:
+
+- **`openai` still reports `?`, and that is correct.** `?` means the SDK
+  reported no usage at all — the openai-agents LiteLLM bridge synthesizes
+  a `Usage` object with zero tokens. It is the one target that genuinely
+  cannot measure this call, and it says so instead of printing a confident
+  `0`. The distinction the whole layer rests on: `?` is "not measured",
+  `-` is "not measurable", and neither is ever rendered as `0`.
+- **Cost varies by target for identical work** — `autogen` $0.001072
+  against `claude` $0.003521, a 3.3x spread for the same prompt and the
+  same model. Different frameworks wrap the same instructions in different
+  amounts of scaffolding. This is exactly the kind of comparison the
+  project exists to make possible, though one sample is not evidence of a
+  general ranking.
+- **`claude`'s cost is the SDK's own figure**, not `pricing.py`'s estimate
+  — the Claude Agent SDK computes cost itself, so that runner uses it. The
+  other five are priced from the static table.
+- **`crewai` took 26.25s against 6.76s in run #5.** Same work, ~4x swing,
+  consistent with the variance already noted below. Still not a benchmark.
+
+One blemish worth recording rather than hiding: the job log contains a
+`RuntimeError: Event loop is closed` traceback, marked as an error, raised
+from `anyio`'s TLS stream teardown after a target finished. Every target
+still succeeded and the job passed, so this is noise during interpreter
+shutdown rather than a failed run — but it is untidy, it makes a green log
+look alarming, and it has not been root-caused. Tracked as follow-up.
+
 **Live run #5 — 2026-09-10: all six targets green.** [GitHub Actions run
 #5](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34541706890),
 `workflow_dispatch` on `main` at commit `b16990e`, model
 `claude-haiku-4-5`, all six targets, `dry_run: false`. This is the run
-taken after the two fixes below landed, and it is the current reference
-result:
+taken after the two fixes below landed. It was the reference result until
+run #6 above superseded it; it is kept because it is the first run in which
+all six targets executed, and because its `-` columns are what run #6's
+real numbers should be read against:
 
 ```
 target       status       wall_s   tokens   cost_usd  final_text

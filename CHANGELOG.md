@@ -39,6 +39,12 @@ breaking changes can land in a patch release and are called out explicitly.
   the SDK's own `total_cost_usd` rather than a static price table; the CrewAI
   runner reports genuine per-call usage from CrewAI's event bus.
 
+  Verified against real APIs, not only stubs: [live run
+  #6](https://github.com/Mehul-Gupta-SMH/CommonADK/actions/runs/34691962910)
+  ran all six targets on `claude-haiku-4-5`, five reporting genuine tokens
+  and cost, and `openai` — the one SDK reporting no usage for that call —
+  reporting `?` rather than `0`. See [docs/demo-runs.md](docs/demo-runs.md).
+
 ### Changed
 
 - **`delegate` and `handoff` edges now build differently where an SDK can
