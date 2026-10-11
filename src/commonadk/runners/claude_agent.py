@@ -68,6 +68,18 @@ from .hooks import HookRegistry
 from .trace import Trace
 
 
+def _sum_reported(model_usage: dict, key: str) -> Optional[int]:
+    """Sum `key` across the model-usage entries that actually report it.
+
+    `None` when no entry does, never `0` -- the None-vs-0 rule. `ModelUsage`
+    declares these keys, but the value is passed through verbatim from the
+    CLI, so an older CLI may simply not send them and a confident `0` would
+    say "this run used no cache" about a run nobody asked.
+    """
+    present = [mu for mu in model_usage.values() if mu.get(key) is not None]
+    return sum(int(mu[key]) for mu in present) if present else None
+
+
 class ClaudeAgentSDKRunner(BaseRunner):
     target = "claude"
 
@@ -328,17 +340,43 @@ class ClaudeAgentSDKRunner(BaseRunner):
         target, even when tokens are known, since a per-model `costUSD`
         the SDK itself computed is strictly more authoritative than this
         project's own static table.
+
+        **Cache tokens are carried separately, and this used to drop
+        them.** `ModelUsage` reports four input-side counts, not one:
+        `inputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`
+        and `outputTokens`. Only the first and last were being summed, so
+        `prompt_tokens` was the UNCACHED input alone while
+        `total_cost_usd` billed all of it.
+
+        For a multi-turn agent run that is most of the input: every turn
+        after the first reads the prefix from cache. The visible symptom
+        was a `prompt_tokens` that barely moved -- ten runs of one consumer
+        across four different task statements and four different tool sets
+        reported four distinct values, three of them identical -- while the
+        SDK's own cost came in at roughly twice what those tokens price to.
+        Nothing in the trace could say why, and `usage_complete` read True
+        throughout, because every call the runner saw had reported usage;
+        it just had not reported all of the input.
+
+        They stay separate rather than folded into `prompt_tokens` because
+        they are billed at different rates (a cache read at a fraction of
+        the input rate, a cache write at a premium), and one number cannot
+        carry two rates. Folding them in would fix the magnitude and break
+        the pricing.
         """
         model_usage = message.model_usage or {}
         if model_usage:
             prompt_tokens = sum(int(mu.get("inputTokens", 0)) for mu in model_usage.values())
             completion_tokens = sum(int(mu.get("outputTokens", 0)) for mu in model_usage.values())
             total_tokens = prompt_tokens + completion_tokens
+            cache_read_tokens = _sum_reported(model_usage, "cacheReadInputTokens")
+            cache_write_tokens = _sum_reported(model_usage, "cacheCreationInputTokens")
             model = next(iter(model_usage)) if len(model_usage) == 1 else self._resolved_model(
                 project, agent_name
             )
         else:
             prompt_tokens = completion_tokens = total_tokens = None
+            cache_read_tokens = cache_write_tokens = None
             model = self._resolved_model(project, agent_name)
 
         return LLMCall(
@@ -349,6 +387,8 @@ class ClaudeAgentSDKRunner(BaseRunner):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost_usd=message.total_cost_usd,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
             # ResultMessage.duration_api_ms is the one genuinely per-LLM-call
             # (well, per-turn) timing figure any of the three runners built
             # so far can report -- Google ADK and OpenAI Agents both always
