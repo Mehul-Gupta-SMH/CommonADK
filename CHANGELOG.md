@@ -4,7 +4,20 @@ All notable changes to CommonADK are recorded here. Versions follow
 [semantic versioning](https://semver.org/); while the project is pre-1.0,
 breaking changes can land in a patch release and are called out explicitly.
 
-## Unreleased
+## 0.0.3 — 2026-10-12
+
+### Added
+
+- **`LLMCall.cache_read_tokens` and `LLMCall.cache_write_tokens`**, summed
+  into `Trace.rollup()["llm_calls"]` alongside the existing counts. Kept
+  separate from `prompt_tokens` rather than folded in, because a cache read
+  bills at a fraction of the input rate and a cache write at a premium: one
+  "input" number cannot carry three rates, and folding them in would fix the
+  magnitude and break the pricing.
+- The rollup's `note` now states that `prompt_tokens` is the **uncached**
+  input whenever cache tokens are present, appended rather than replacing
+  the usage/cost completeness notes — cached input is true independently of
+  those.
 
 ### Fixed
 
