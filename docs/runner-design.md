@@ -305,6 +305,36 @@ not — in which case cost is skipped for that call too, propagating the
 because neither SDK computes cost itself — contrast with Claude Agent SDK
 below, which does.
 
+### Cache-side input is a separate count, not part of `prompt_tokens`
+
+`prompt_tokens` is the **uncached** input. Prompt-cache reads and writes are
+reported separately, as `cache_read_tokens` and `cache_write_tokens` on
+`LLMCall` and in the rollup, because they are billed at different rates — a
+read at a fraction of the input rate, a write at a premium — and one
+"input" number cannot carry three rates. Folding them in would fix the
+magnitude and break the pricing.
+
+This was found by a consumer, not by a test. The Claude Agent SDK runner
+summed `inputTokens` and `outputTokens` from `ModelUsage` and discarded
+`cacheReadInputTokens` and `cacheCreationInputTokens`, so for a multi-turn
+agent run — where every turn after the first reads the prefix from cache —
+`prompt_tokens` was a small, nearly constant fraction of the input while
+`total_cost_usd` billed all of it. Ten runs across four task statements and
+four tool sets reported four distinct `prompt_tokens` values, three of them
+identical, and a cost roughly twice what those tokens price to.
+
+**No completeness flag caught it, and none could.** `usage_complete` is
+`count == 0 or len(reported) == count` — "every LLM call I *saw* reported
+usage", not "I saw every LLM call", and here every call *had* reported
+usage. It just had not reported all of the input. So the rollup's `note`
+now says outright that `prompt_tokens` is the uncached portion whenever
+cache tokens are present, rather than leaving a correct-looking number to
+be read as the whole.
+
+A runner that cannot report cache usage leaves both counts `None` — the
+None-vs-0 rule. `None` means "not reported"; a reported `0` means an
+uncached run, which is a measurement worth being able to state.
+
 ## Trace and rollups (`trace.py`)
 
 `Trace` is an ordered `list[Event]` plus `rollup()`, which computes:
@@ -315,8 +345,9 @@ below, which does.
   "llm_calls": {
     "count": 3, "reported_count": 2, "usage_complete": false,
     "prompt_tokens": 340, "completion_tokens": 128, "total_tokens": 468,
+    "cache_read_tokens": 1800, "cache_write_tokens": 220,
     "priced_count": 2, "cost_complete": false, "cost_usd": 0.0041,
-    "note": "1 of 3 LLM call(s) did not report token usage; the token totals above sum only the calls that did -- they are NOT the true total for this run."
+    "note": "1 of 3 LLM call(s) did not report token usage; the token totals above sum only the calls that did -- they are NOT the true total for this run. prompt_tokens is the UNCACHED input only: a further 2020 input token(s) were cache reads or writes, billed at different rates (see cache_read_tokens / cache_write_tokens). Pricing prompt_tokens alone understates this run's input."
   },
   "tool_calls": {"count": 2, "errors": 0},
   "per_agent": {

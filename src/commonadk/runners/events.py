@@ -121,6 +121,30 @@ class LLMCall(Event):
     cost_usd: Optional[float] = None
     duration_ms: Optional[float] = None
 
+    cache_read_tokens: Optional[int] = None
+    """Input tokens served from a prompt cache, billed at a fraction of the
+    input rate.
+
+    Separate from `prompt_tokens` rather than folded into it, because they
+    are priced differently and a single "input" number cannot carry two
+    rates. `None` means this SDK did not report it for this call -- the
+    None-vs-0 rule; `0` means it reported none.
+
+    Why it is here: `prompt_tokens` was being read as "the input tokens",
+    and for a cached multi-turn run it is only the UNCACHED portion. An
+    agent run whose input is mostly cache reads reports a small, nearly
+    constant `prompt_tokens` while its real input is many times that, so a
+    cost estimated from `prompt_tokens` alone is a fraction of the true one
+    and does not vary with the task.
+    """
+
+    cache_write_tokens: Optional[int] = None
+    """Input tokens written INTO a prompt cache, billed at a premium over
+    the input rate.
+
+    The other half of the same correction. Same None-vs-0 rule.
+    """
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class ToolCall(Event):

@@ -99,8 +99,12 @@ def test_claude_runner_normalizes_tool_call_and_llm_usage(
             "claude-sonnet-5": {
                 "inputTokens": 100,
                 "outputTokens": 40,
-                "cacheReadInputTokens": 0,
-                "cacheCreationInputTokens": 0,
+                # Non-zero on purpose. These were both 0 here, and that is
+                # why the runner dropping them never failed a test: a
+                # dropped 0 is indistinguishable from a carried 0. A real
+                # multi-turn run reads most of its input from cache.
+                "cacheReadInputTokens": 900,
+                "cacheCreationInputTokens": 150,
                 "webSearchRequests": 0,
                 "costUSD": 0.001234,
                 "contextWindow": 200000,
@@ -157,6 +161,12 @@ def test_claude_runner_normalizes_tool_call_and_llm_usage(
     assert llm_call.prompt_tokens == 100
     assert llm_call.completion_tokens == 40
     assert llm_call.total_tokens == 140
+    # The cache-side input, carried rather than discarded. `prompt_tokens`
+    # stays the UNCACHED input: these are billed at different rates (a read
+    # at a fraction of the input rate, a write at a premium), so one
+    # "input" number cannot carry them.
+    assert llm_call.cache_read_tokens == 900
+    assert llm_call.cache_write_tokens == 150
     # SDK-computed cost, passed through verbatim -- pricing.py is never
     # consulted for this target (see claude_agent.py's docstring).
     assert llm_call.cost_usd == 0.001234
@@ -168,6 +178,17 @@ def test_claude_runner_normalizes_tool_call_and_llm_usage(
     assert finished.total_tokens == 140
     assert finished.total_cost_usd == 0.001234
     assert finished.usage_complete is True
+
+    # And the rollup says, in words, that its input figure is partial --
+    # because no completeness flag can catch this. Every call DID report
+    # usage; it just did not report all of the input, so `usage_complete`
+    # reads True while `prompt_tokens` is a tenth of what was billed.
+    llm = trace.rollup()["llm_calls"]
+    assert llm["cache_read_tokens"] == 900
+    assert llm["cache_write_tokens"] == 150
+    assert llm["usage_complete"] is True
+    assert "UNCACHED input only" in (llm["note"] or ""), llm["note"]
+    assert "1050" in (llm["note"] or ""), "the note must say how much"
 
     # session=None -- the ad hoc client this runner created must be closed.
     assert fake_disconnect.called is True
@@ -226,12 +247,144 @@ def test_claude_runner_usage_unreported_becomes_none_not_zero(
     assert llm_call.total_tokens is None
     assert llm_call.cost_usd is None
     assert llm_call.duration_ms is None
+    assert llm_call.cache_read_tokens is None
+    assert llm_call.cache_write_tokens is None
 
     finished = trace.events[-1]
     assert isinstance(finished, RunFinished)
     assert finished.usage_complete is False  # one LLMCall, unreported -- honest, not "complete"
     assert finished.total_tokens is None
     assert finished.total_cost_usd is None
+
+
+def test_claude_runner_cache_keys_absent_sum_to_none_not_zero(
+    tmp_project, tavily_env, anthropic_env, monkeypatch
+):
+    """`ModelUsage` declares the cache keys, but the dict is passed through
+    verbatim from the CLI -- so an older CLI may simply not send them.
+
+    A confident `0` there would say "this run used no cache" about a run
+    nobody asked, and then `prompt_tokens` would read as the whole input
+    with nothing to contradict it. Absent is None; present-and-zero is 0.
+    """
+    pytest.importorskip("claude_agent_sdk")
+
+    from claude_agent_sdk import ClaudeSDKClient
+    from claude_agent_sdk.types import ResultMessage
+
+    from commonadk.runners.claude_agent import ClaudeAgentSDKRunner
+
+    result_message = ResultMessage(
+        subtype="success",
+        duration_ms=50,
+        duration_api_ms=None,
+        is_error=False,
+        num_turns=1,
+        session_id="s1",
+        total_cost_usd=0.002,
+        result="hi",
+        # Tokens reported, cache keys simply not sent.
+        model_usage={"claude-sonnet-5": {"inputTokens": 70, "outputTokens": 10}},
+        usage=None,
+    )
+
+    async def fake_connect(self, prompt=None):
+        return None
+
+    async def fake_query(self, prompt, session_id="default"):
+        return None
+
+    async def fake_receive_messages(self):
+        yield result_message
+
+    async def fake_disconnect(self):
+        return None
+
+    monkeypatch.setattr(ClaudeSDKClient, "connect", fake_connect)
+    monkeypatch.setattr(ClaudeSDKClient, "query", fake_query)
+    monkeypatch.setattr(ClaudeSDKClient, "receive_messages", fake_receive_messages)
+    monkeypatch.setattr(ClaudeSDKClient, "disconnect", fake_disconnect)
+
+    project = load(str(tmp_project))
+    trace = ClaudeAgentSDKRunner().run_sync(project, "coordinator", "hi")
+
+    llm_call = next(e for e in trace.events if isinstance(e, LLMCall))
+    assert llm_call.prompt_tokens == 70
+    assert llm_call.cache_read_tokens is None, "absent is not zero"
+    assert llm_call.cache_write_tokens is None
+
+    llm = trace.rollup()["llm_calls"]
+    assert llm["cache_read_tokens"] is None
+    assert llm["cache_write_tokens"] is None
+    # And no cache note, because nothing established there was any cache.
+    assert "UNCACHED" not in (llm["note"] or "")
+
+
+def test_claude_runner_zero_cache_is_zero_not_none(
+    tmp_project, tavily_env, anthropic_env, monkeypatch
+):
+    """The other side of the rule: a reported zero is a measurement.
+
+    An uncached single-turn run genuinely has no cache tokens, and that is
+    worth being able to say -- it is what distinguishes it from a runner
+    that does not report cache at all.
+    """
+    pytest.importorskip("claude_agent_sdk")
+
+    from claude_agent_sdk import ClaudeSDKClient
+    from claude_agent_sdk.types import ResultMessage
+
+    from commonadk.runners.claude_agent import ClaudeAgentSDKRunner
+
+    result_message = ResultMessage(
+        subtype="success",
+        duration_ms=50,
+        duration_api_ms=None,
+        is_error=False,
+        num_turns=1,
+        session_id="s1",
+        total_cost_usd=0.002,
+        result="hi",
+        model_usage={
+            "claude-sonnet-5": {
+                "inputTokens": 70,
+                "outputTokens": 10,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+            }
+        },
+        usage=None,
+    )
+
+    async def fake_connect(self, prompt=None):
+        return None
+
+    async def fake_query(self, prompt, session_id="default"):
+        return None
+
+    async def fake_receive_messages(self):
+        yield result_message
+
+    async def fake_disconnect(self):
+        return None
+
+    monkeypatch.setattr(ClaudeSDKClient, "connect", fake_connect)
+    monkeypatch.setattr(ClaudeSDKClient, "query", fake_query)
+    monkeypatch.setattr(ClaudeSDKClient, "receive_messages", fake_receive_messages)
+    monkeypatch.setattr(ClaudeSDKClient, "disconnect", fake_disconnect)
+
+    project = load(str(tmp_project))
+    trace = ClaudeAgentSDKRunner().run_sync(project, "coordinator", "hi")
+
+    llm_call = next(e for e in trace.events if isinstance(e, LLMCall))
+    assert llm_call.cache_read_tokens == 0, "reported zero is a measurement"
+    assert llm_call.cache_write_tokens == 0
+
+    llm = trace.rollup()["llm_calls"]
+    assert llm["cache_read_tokens"] == 0
+    assert "UNCACHED" not in (llm["note"] or ""), (
+        "no cached input, so prompt_tokens IS the input and the note would "
+        "be a warning about nothing")
 
 
 def test_claude_runner_subagent_boundary_and_transfer_via_agent_tool(

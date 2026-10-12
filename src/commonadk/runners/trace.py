@@ -25,20 +25,49 @@ def _rollup_llm_calls(calls: list[LLMCall]) -> dict[str, Any]:
     costed = [c for c in calls if c.cost_usd is not None]
     cost_complete = count == 0 or len(costed) == count
 
-    note: Optional[str] = None
+    # Cache-side input, summed over the calls that reported it. `None` when
+    # none did -- the None-vs-0 rule: a confident 0 would say "this run used
+    # no cache" about a runner that simply does not report it.
+    cache_read = [c for c in calls if c.cache_read_tokens is not None]
+    cache_write = [c for c in calls if c.cache_write_tokens is not None]
+    cache_read_tokens = (
+        sum(c.cache_read_tokens for c in cache_read) if cache_read else None
+    )
+    cache_write_tokens = (
+        sum(c.cache_write_tokens for c in cache_write) if cache_write else None
+    )
+    cached_input = (cache_read_tokens or 0) + (cache_write_tokens or 0)
+
+    notes: list[str] = []
     if not usage_complete:
-        note = (
+        notes.append(
             f"{count - len(reported)} of {count} LLM call(s) did not report "
             "token usage; the token totals below sum only the calls that "
             "did -- they are NOT the true total for this run."
         )
     elif not cost_complete:
-        note = (
+        notes.append(
             f"{count - len(costed)} of {count} LLM call(s) used a model not "
             "in the static pricing table (runners/pricing.py); cost_usd "
             "below sums only the calls that were priced -- it is NOT the "
             "true total cost for this run."
         )
+    if cached_input:
+        # Appended rather than `elif`-ed: this is true independently of the
+        # two above, and the reason it has to be said at all is that
+        # `prompt_tokens` was being read as "the input tokens". A run whose
+        # input is mostly cache reads has a small, nearly constant
+        # `prompt_tokens` and a cost many times what it prices to -- and no
+        # completeness flag catches it, because every call DID report
+        # usage. It just did not report all of the input.
+        notes.append(
+            f"prompt_tokens is the UNCACHED input only: a further "
+            f"{cached_input} input token(s) were cache reads or writes, "
+            "billed at different rates (see cache_read_tokens / "
+            "cache_write_tokens). Pricing prompt_tokens alone understates "
+            "this run's input."
+        )
+    note: Optional[str] = " ".join(notes) if notes else None
 
     return {
         "count": count,
@@ -55,6 +84,8 @@ def _rollup_llm_calls(calls: list[LLMCall]) -> dict[str, Any]:
             else None
         ),
         "total_tokens": (sum(c.total_tokens for c in reported) if reported else None),
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
         "priced_count": len(costed),
         "cost_complete": cost_complete,
         "cost_usd": (round(sum(c.cost_usd for c in costed), 6) if costed else None),

@@ -4,6 +4,37 @@ All notable changes to CommonADK are recorded here. Versions follow
 [semantic versioning](https://semver.org/); while the project is pre-1.0,
 breaking changes can land in a patch release and are called out explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **The Claude Agent SDK runner dropped prompt-cache token counts, so
+  `prompt_tokens` was the uncached input alone.** `ModelUsage` reports four
+  input-side counts — `inputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`, `outputTokens` — and only the first and last
+  were summed. For a multi-turn agent run, where every turn after the first
+  reads the prefix from cache, that leaves `prompt_tokens` a small and
+  nearly constant fraction of the input while `total_cost_usd` bills all of
+  it. A consumer measured ten runs across four task statements and four
+  tool sets: four distinct `prompt_tokens` values, three of them identical,
+  and an SDK cost roughly twice what those tokens price to.
+
+  No completeness flag caught it and none could. `usage_complete` is
+  `count == 0 or len(reported) == count` — "every call I *saw* reported
+  usage", not "I saw every call" — and every call here *had* reported
+  usage. It had just not reported all of the input.
+
+  `LLMCall` now carries `cache_read_tokens` and `cache_write_tokens`, the
+  rollup sums them, and the rollup's `note` states that `prompt_tokens` is
+  the uncached portion whenever cache tokens are present. They are kept
+  separate from `prompt_tokens` rather than folded in because the three are
+  billed at different rates, and one number cannot carry three rates.
+
+  A runner that cannot report cache usage leaves both `None` — the
+  None-vs-0 rule. The regression test that should have caught this had both
+  cache fields pinned at `0`, where a dropped zero is indistinguishable
+  from a carried one; it now uses non-zero counts.
+
 ## 0.0.2 — 2026-09-12
 
 ### Fixed
