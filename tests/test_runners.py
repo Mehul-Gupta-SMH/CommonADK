@@ -927,3 +927,119 @@ def test_cli_run_without_stream_or_trace_still_just_prints_final_text_on_unporte
     assert rc != 0
     err = capsys.readouterr().err
     assert "ANTHROPIC_API_KEY" in err
+
+
+# ---------------------------------------------------------------------------
+# Per-run context and user_id (`run(..., context=)`, `RunSession.user_id`)
+# ---------------------------------------------------------------------------
+
+
+def test_with_context_appends_to_the_entry_agent_only_and_never_mutates(tmp_project):
+    from commonadk.runners import with_context
+
+    project = load(str(tmp_project))
+    original = project.agents["coordinator"].instructions
+    others = {n: a.instructions for n, a in project.agents.items() if n != "coordinator"}
+
+    copy = with_context(project, "coordinator", "## Memory\n- prefers email")
+
+    assert copy.agents["coordinator"].instructions == original + "\n\n## Memory\n- prefers email"
+    assert {n: a.instructions for n, a in copy.agents.items() if n != "coordinator"} == others
+    assert project.agents["coordinator"].instructions == original  # untouched
+    assert with_context(project, "coordinator", None) is project
+    assert with_context(project, "coordinator", "") is project
+    # An unknown agent is left for build() to reject with its own message.
+    assert with_context(project, "no-such-agent", "ctx") is project
+    with pytest.raises(Exception) as plain:
+        project.build("no-such-agent", target="google-adk")
+    with pytest.raises(plain.type) as via_context:
+        with_context(project, "no-such-agent", "ctx").build("no-such-agent", target="google-adk")
+    assert str(via_context.value) == str(plain.value)
+
+
+def test_prompt_with_context():
+    from commonadk.runners import prompt_with_context
+
+    assert prompt_with_context("hi", "ctx") == "ctx\n\nhi"
+    assert prompt_with_context("hi", None) == "hi"
+
+
+def test_run_started_carries_user_id_and_context_via_and_round_trips():
+    e = RunStarted(target="openai", agent_name="a", prompt="p", user_id="u1", context_via="prompt")
+    back = event_from_dict(json.loads(json.dumps(e.to_dict())))
+    assert (back.user_id, back.context_via) == ("u1", "prompt")
+    # Traces written before these fields existed still load.
+    old = {k: v for k, v in e.to_dict().items() if k not in ("user_id", "context_via")}
+    assert event_from_dict(old).context_via is None
+    assert RunSession().user_id is None
+
+
+def test_google_adk_context_goes_to_instructions_then_prompt_on_reuse(
+    tmp_project, tavily_env, monkeypatch
+):
+    pytest.importorskip("google.adk")
+
+    import google.adk.runners as adk_runners_module
+    from google.adk.events.event import Event as AdkEvent
+    from google.genai import types as genai_types
+
+    from commonadk.runners.google_adk import GoogleADKRunner
+
+    seen = []
+
+    async def fake_run_async(self, *, user_id, session_id, new_message=None, **kwargs):
+        seen.append((self.agent.instruction, new_message.parts[0].text, user_id))
+        yield AdkEvent(
+            author="coordinator",
+            content=genai_types.Content(role="model", parts=[genai_types.Part(text="ok")]),
+        )
+
+    monkeypatch.setattr(adk_runners_module.Runner, "run_async", fake_run_async)
+
+    project = load(str(tmp_project))
+    runner = GoogleADKRunner()
+    session = RunSession(user_id="ada")
+
+    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
+    t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
+
+    (instr1, msg1, uid1), (instr2, msg2, uid2) = seen
+    assert instr1.endswith("CTX-1") and msg1 == "turn 1"
+    assert "CTX-2" not in instr2 and msg2 == "CTX-2\n\nturn 2"  # reused agent: via prompt
+    assert uid1 == uid2 == "ada"  # the session's user, not the runner default
+    starts = [t.events[0] for t in (t1, t2)]
+    assert [s.context_via for s in starts] == ["instructions", "prompt"]
+    assert [s.prompt for s in starts] == ["turn 1", "turn 2"]  # caller's own prompt
+    assert {s.user_id for s in starts} == {"ada"}
+
+
+def test_openai_agents_context_goes_to_instructions_every_turn(
+    tmp_project, tavily_env, monkeypatch
+):
+    pytest.importorskip("agents")
+
+    from agents import Runner as OaRunner
+
+    from commonadk.runners.openai_agents import OpenAIAgentsRunner
+
+    seen = []
+
+    def fake_run_streamed(cls, starting_agent, input, session=None, **kw):
+        seen.append((starting_agent.instructions, input))
+        return _fake_openai_stream_result([], [], "ok")
+
+    monkeypatch.setattr(OaRunner, "run_streamed", classmethod(fake_run_streamed))
+
+    project = load(str(tmp_project))
+    runner = OpenAIAgentsRunner()
+    session = RunSession(user_id="ada")
+
+    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
+    t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
+    t3 = runner.run_sync(project, "coordinator", "turn 3", session=session)
+
+    assert seen[0][0].endswith("CTX-1") and seen[0][1] == "turn 1"
+    assert seen[1][0].endswith("CTX-2") and "CTX-1" not in seen[1][0] and seen[1][1] == "turn 2"
+    assert "CTX" not in seen[2][0]
+    assert [t.events[0].context_via for t in (t1, t2, t3)] == ["instructions", "instructions", None]
+    assert t1.events[0].user_id == "ada"

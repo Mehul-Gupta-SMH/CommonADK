@@ -890,3 +890,74 @@ def test_crewai_runner_unregisters_handlers_so_a_second_run_does_not_double_coun
 
     assert len([e for e in trace1.events if isinstance(e, ToolCall)]) == 1
     assert len([e for e in trace2.events if isinstance(e, ToolCall)]) == 1
+
+
+def test_claude_context_goes_to_system_prompt_then_prompt_on_reuse(
+    tmp_project, tavily_env, anthropic_env, monkeypatch
+):
+    pytest.importorskip("claude_agent_sdk")
+
+    from claude_agent_sdk import ClaudeSDKClient
+    from claude_agent_sdk.types import ResultMessage
+
+    from commonadk.runners.claude_agent import ClaudeAgentSDKRunner
+
+    system_prompts = []
+    queries = []
+
+    async def fake_connect(self, prompt=None):
+        system_prompts.append(self.options.system_prompt)
+
+    async def fake_query(self, prompt, session_id="default"):
+        queries.append(prompt)
+
+    async def fake_receive_messages(self):
+        yield ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s1", result="ok",
+        )
+
+    async def fake_disconnect(self):
+        pass
+
+    monkeypatch.setattr(ClaudeSDKClient, "connect", fake_connect)
+    monkeypatch.setattr(ClaudeSDKClient, "query", fake_query)
+    monkeypatch.setattr(ClaudeSDKClient, "receive_messages", fake_receive_messages)
+    monkeypatch.setattr(ClaudeSDKClient, "disconnect", fake_disconnect)
+
+    project = load(str(tmp_project))
+    runner = ClaudeAgentSDKRunner()
+    session = RunSession(user_id="ada")
+
+    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
+    t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
+
+    assert len(system_prompts) == 1 and system_prompts[0].endswith("CTX-1")
+    assert queries == ["turn 1", "CTX-2\n\nturn 2"]
+    assert [t.events[0].context_via for t in (t1, t2)] == ["instructions", "prompt"]
+    assert [t.events[0].prompt for t in (t1, t2)] == ["turn 1", "turn 2"]
+    assert t1.events[0].user_id == "ada"
+
+
+def test_crewai_context_goes_to_the_entry_agent_backstory(tmp_project, tavily_env, monkeypatch):
+    pytest.importorskip("crewai")
+    os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
+    from crewai import Crew
+
+    from commonadk.runners.crewai_runner import CrewAIRunner
+
+    seen = []
+
+    async def fake_kickoff_async(self, inputs=None, input_files=None, from_checkpoint=None):
+        seen.append(self.manager_agent.backstory)
+        raise RuntimeError("stop after inspecting the built crew")
+
+    monkeypatch.setattr(Crew, "kickoff_async", fake_kickoff_async)
+
+    project = load(str(tmp_project))
+    runner = CrewAIRunner()
+    with pytest.raises(RuntimeError, match="stop after"):
+        runner.run_sync(project, "coordinator", "go", context="CTX-1")
+    assert seen and seen[0].endswith("CTX-1")

@@ -380,6 +380,7 @@ class RunSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     turns: int = 0
     native: dict[str, Any] = field(default_factory=dict)  # keyed by target
+    user_id: Optional[str] = None  # carried onto RunStarted; ADK's own user id
 ```
 
 A caller creates one `RunSession()` per logical conversation and passes it
@@ -401,6 +402,47 @@ shipped runner needs to invoke this — it's a contract for the four
 follow-up runners, all of which do have some session story (see the table
 below), so no v1 runner currently exercises the raise path; a future runner
 without one should follow `BaseRunner.run`'s docstring exactly here.
+
+## Per-run context (`run(..., context=)`)
+
+Hooks are observe-only, so they cannot put anything *into* a run. Per-run
+context -- memory from a store like CommonMemo, retrieved documents -- has
+its own parameter instead: `runner.run(project, agent, prompt, context=...)`
+on every target.
+
+**Delivery: instructions, by one SDK-neutral mechanism.** Every adapter
+reads `AgentSpec.instructions` at build time, so `with_context(project,
+agent, context)` returns a copy of the project whose entry agent's
+instructions end with the context, and the runner builds from that copy.
+No adapter changes; all six targets get it the same way. Only the entry
+agent changes -- sub-agents keep their own instructions -- and the caller's
+`Project` is never mutated.
+
+**The reuse case.** Three runners keep an SDK object across the turns of a
+`RunSession`: Google ADK's bound `InMemoryRunner`, the Claude client, and
+AutoGen's cached team. That object was built with turn 1's instructions and
+cannot take new ones, so on turn 2+ the context goes in front of the prompt
+instead (`prompt_with_context`). This is reported, not silent:
+
+| `RunStarted.context_via` | meaning |
+|---|---|
+| `"instructions"` | the agent was built this turn with the context in its instructions |
+| `"prompt"` | a reused agent; the context was prepended to this turn's prompt |
+| `None` | no context was given |
+
+OpenAI Agents, LangGraph and CrewAI rebuild every call, so they are always
+`"instructions"`.
+
+**`RunStarted.prompt` is always the caller's own prompt**, never the
+context-carrying one -- a memory system recording what the user said must
+not record its own injected memory back as user input.
+
+**`user_id`.** `RunSession.user_id` (default `None`) is carried onto every
+`RunStarted` of the session, and Google ADK's runner uses it as the ADK
+session service's user id instead of the fixed `"commonadk-runner"`.
+
+Not covered yet: the CLI has no `--context` flag, and the mixed-runtime
+path (`mixed.py`) does not take `context`.
 
 ## Hook contract (`hooks.py`)
 

@@ -111,7 +111,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession
+from .base import BaseRunner, RunSession, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -143,6 +143,7 @@ class CrewAIRunner(BaseRunner):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         if session is not None:
             # See module docstring, "NO SESSION STORY (v1)" -- raised before
@@ -181,7 +182,7 @@ class CrewAIRunner(BaseRunner):
 
         # Left outside try/except for the same reason as every other
         # runner: a build failure means the run never actually started.
-        crew = project.build(agent_name, target="crewai")
+        crew = with_context(project, agent_name, context).build(agent_name, target="crewai")
 
         relevant_agent_ids = {str(a.id) for a in crew.agents}
         if crew.manager_agent is not None:
@@ -199,6 +200,7 @@ class CrewAIRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=None,
+                context_via="instructions" if context else None,
             ),
         )
 

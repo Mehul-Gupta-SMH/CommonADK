@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession
+from .base import BaseRunner, RunSession, prompt_with_context, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -91,6 +91,7 @@ class ClaudeAgentSDKRunner(BaseRunner):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         from claude_agent_sdk import ClaudeSDKClient
         from claude_agent_sdk.types import (
@@ -124,10 +125,15 @@ class ClaudeAgentSDKRunner(BaseRunner):
         # Always built, matching both shipped runners -- discarded below on
         # a session turn that reuses an already-connected client (see
         # module docstring, "RunSession support").
-        options = project.build(agent_name, target="claude")
-
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         client = state.get("client")
+        # A reused client keeps the system prompt it connected with, so a
+        # later turn's context rides on the prompt (BaseRunner.run, "context").
+        reusing = client is not None
+        built_from = project if reusing else with_context(project, agent_name, context)
+        options = built_from.build(agent_name, target="claude")
+        context_via = ("prompt" if reusing else "instructions") if context else None
+        sent_prompt = prompt_with_context(prompt, context) if reusing else prompt
         if client is None:
             client = ClaudeSDKClient(options=options)
             await client.connect()
@@ -143,6 +149,8 @@ class ClaudeAgentSDKRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
+                user_id=session.user_id if session is not None else None,
+                context_via=context_via,
             ),
         )
 
@@ -170,7 +178,7 @@ class ClaudeAgentSDKRunner(BaseRunner):
 
         try:
             try:
-                await client.query(prompt)
+                await client.query(sent_prompt)
 
                 async for message in client.receive_response():
                     if isinstance(message, (AssistantMessage, UserMessage)):

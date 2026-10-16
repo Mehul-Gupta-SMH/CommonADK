@@ -49,6 +49,43 @@ class RunSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     turns: int = 0
     native: dict[str, Any] = field(default_factory=dict)
+    user_id: Optional[str] = None
+    """Who this conversation is with, when the caller knows. Carried onto
+    every `RunStarted` of the session, and used as the SDK's own user id
+    where the SDK has one (Google ADK's session service)."""
+
+
+CONTEXT_SEPARATOR = "\n\n"
+
+
+def with_context(project: "Project", agent_name: str, context: Optional[str]) -> "Project":
+    """A copy of `project` whose `agent_name` instructions end with `context`.
+
+    The one mechanism every runner uses to put per-run context (memory,
+    retrieved documents, ...) into an agent's instructions: every adapter
+    reads `AgentSpec.instructions` at build time, so building from this
+    copy delivers the context on all six targets without any SDK-specific
+    code. Only the entry agent changes; sub-agents keep their own
+    instructions. `project` itself is never mutated. Empty or `None`
+    context returns `project` unchanged, and so does an unknown
+    `agent_name` -- `build()` then raises its own, specific error for it.
+    """
+    if not context or agent_name not in project.agents:
+        return project
+    spec = project.agents[agent_name]
+    joined = f"{spec.instructions}{CONTEXT_SEPARATOR}{context}" if spec.instructions else context
+    agents = dict(project.agents)
+    agents[agent_name] = spec.model_copy(update={"instructions": joined})
+    return project.model_copy(update={"agents": agents})
+
+
+def prompt_with_context(prompt: str, context: Optional[str]) -> str:
+    """`prompt` preceded by `context` -- the fallback delivery for a session
+    turn whose SDK object was built on an earlier turn and so can no longer
+    take new instructions (see `BaseRunner.run`, "context")."""
+    if not context:
+        return prompt
+    return f"{context}{CONTEXT_SEPARATOR}{prompt}"
 
 
 class BaseRunner(ABC):
@@ -72,8 +109,22 @@ class BaseRunner(ABC):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         """Run one turn and return its `Trace` (events + rollup).
+
+        `context` is per-run text for the agent -- memory, retrieved
+        documents -- delivered as part of the entry agent's *instructions*
+        (`with_context`) whenever this turn builds the agent. A session turn
+        that reuses an SDK object built on an earlier turn (Google ADK's
+        bound runner, the Claude client, AutoGen's team) cannot take new
+        instructions, so there the context goes in front of the prompt
+        instead (`prompt_with_context`). Never silently: `RunStarted.
+        context_via` says which happened (`"instructions"`, `"prompt"`, or
+        `None` when no context was given), and `RunStarted.prompt` is always
+        the caller's own prompt, never the context-carrying one -- so a
+        consumer recording what the user said does not record its own
+        injected memory back as user input.
 
         Contract every implementation must follow (see docs/runner-design.md,
         "Fatal vs. inline RunError" for the full rationale):
@@ -102,10 +153,11 @@ class BaseRunner(ABC):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         """Synchronous convenience wrapper around `run` (`asyncio.run`)."""
         return asyncio.run(
-            self.run(project, agent_name, prompt, session=session, hooks=hooks)
+            self.run(project, agent_name, prompt, session=session, hooks=hooks, context=context)
         )
 
     @staticmethod
@@ -121,4 +173,4 @@ class BaseRunner(ABC):
             hooks.fire(event)
 
 
-__all__ = ["BaseRunner", "RunSession"]
+__all__ = ["BaseRunner", "RunSession", "with_context", "prompt_with_context", "CONTEXT_SEPARATOR"]

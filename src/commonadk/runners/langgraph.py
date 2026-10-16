@@ -211,7 +211,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession
+from .base import BaseRunner, RunSession, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -240,6 +240,7 @@ class LangGraphRunner(BaseRunner):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         from langchain_core.messages import AIMessage, ToolMessage
 
@@ -253,7 +254,7 @@ class LangGraphRunner(BaseRunner):
         # below. The graph itself is rebuilt fresh every turn -- see module
         # docstring, "Session/multi-turn" -- history lives in `session`,
         # never in the graph object.
-        graph = project.build(agent_name, target=self.target)
+        graph = with_context(project, agent_name, context).build(agent_name, target=self.target)
 
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         history: list[Any] = state.get("messages", [])
@@ -267,6 +268,8 @@ class LangGraphRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
+                user_id=session.user_id if session is not None else None,
+                context_via="instructions" if context else None,
             ),
         )
 

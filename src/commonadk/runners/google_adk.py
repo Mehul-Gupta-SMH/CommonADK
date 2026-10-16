@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession
+from .base import BaseRunner, RunSession, prompt_with_context, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -50,6 +50,7 @@ class GoogleADKRunner(BaseRunner):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         from google.adk.runners import InMemoryRunner
         from google.genai import types as genai_types
@@ -65,15 +66,23 @@ class GoogleADKRunner(BaseRunner):
         # like it always has (a clean exception, no trace, no RunStarted
         # for a run that never actually started) rather than being
         # reframed as a run that "started and then errored".
-        agent = project.build(agent_name, target="google-adk")
-
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         adk_runner = state.get("runner")
+        # A later session turn reuses the runner (and the agent inside it)
+        # bound on turn 1, so its instructions are fixed: context for that
+        # turn rides on the prompt instead (BaseRunner.run, "context").
+        reusing = adk_runner is not None
+        built_from = project if reusing else with_context(project, agent_name, context)
+        agent = built_from.build(agent_name, target="google-adk")
         if adk_runner is None:
             adk_runner = InMemoryRunner(agent=agent, app_name=project.config.name)
             if session is not None:
                 state["runner"] = adk_runner
-        user_id = state.setdefault("user_id", "commonadk-runner")
+        user_id = state.setdefault(
+            "user_id", (session.user_id if session is not None else None) or "commonadk-runner"
+        )
+        context_via = ("prompt" if reusing else "instructions") if context else None
+        sent_prompt = prompt_with_context(prompt, context) if reusing else prompt
 
         self._emit(
             trace,
@@ -84,6 +93,8 @@ class GoogleADKRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
+                user_id=session.user_id if session is not None else None,
+                context_via=context_via,
             ),
         )
 
@@ -101,7 +112,7 @@ class GoogleADKRunner(BaseRunner):
                     state["adk_session_id"] = adk_session_id
 
             message = genai_types.Content(
-                role="user", parts=[genai_types.Part(text=prompt)]
+                role="user", parts=[genai_types.Part(text=sent_prompt)]
             )
             pending_calls: dict[str, dict[str, Any]] = {}
             text_chunks: list[str] = []

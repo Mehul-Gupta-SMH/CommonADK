@@ -482,3 +482,68 @@ def test_langgraph_runner_session_accumulates_history_across_turns(
     # After turn 2: turn 1's own 2-message final state, plus turn 2's new
     # user message, plus turn 2's own answer -- 4 messages total.
     assert len(session.native["langgraph"]["messages"]) == 4
+
+
+def test_autogen_context_goes_to_system_message_then_task_on_reuse(
+    tmp_project, provider_keys_env, monkeypatch
+):
+    from autogen_agentchat.agents import AssistantAgent
+    from autogen_agentchat.base import TaskResult
+
+    from commonadk.runners.autogen import AutoGenRunner
+
+    seen = []
+
+    async def fake_run_stream(self, *, task=None, cancellation_token=None, output_task_messages=True):
+        seen.append((self._system_messages[0].content, task))
+        yield TaskResult(messages=[])
+
+    monkeypatch.setattr(AssistantAgent, "run_stream", fake_run_stream)
+
+    project = load(str(tmp_project))
+    runner = AutoGenRunner()
+    session = RunSession(user_id="ada")
+
+    t1 = runner.run_sync(project, "writer", "turn 1", session=session, context="CTX-1")
+    t2 = runner.run_sync(project, "writer", "turn 2", session=session, context="CTX-2")
+
+    (sys1, task1), (sys2, task2) = seen
+    assert sys1.endswith("CTX-1") and task1 == "turn 1"
+    assert sys2 == sys1 and task2 == "CTX-2\n\nturn 2"
+    assert [t.events[0].context_via for t in (t1, t2)] == ["instructions", "prompt"]
+    assert t2.events[0].user_id == "ada"
+
+
+def test_langgraph_context_goes_to_instructions_every_turn(
+    tmp_project, provider_keys_env, monkeypatch
+):
+    from langchain_core.messages import AIMessage
+    from langgraph.graph.state import CompiledStateGraph
+
+    import commonadk.models as models
+    from commonadk.runners.langgraph import LangGraphRunner
+
+    built_with = []
+    original_build = models.Project.build
+
+    def recording_build(self, agent_name, target):
+        built_with.append(self.agents[agent_name].instructions)
+        return original_build(self, agent_name, target)
+
+    async def fake_astream(self, input, *, config=None, stream_mode=None, subgraphs=False, **kwargs):
+        yield (), {"messages": [*input["messages"], AIMessage(id="ai", name="writer", content="ok")]}
+
+    monkeypatch.setattr(models.Project, "build", recording_build)
+    monkeypatch.setattr(CompiledStateGraph, "astream", fake_astream)
+
+    project = load(str(tmp_project))
+    runner = LangGraphRunner()
+    session = RunSession()
+
+    t1 = runner.run_sync(project, "writer", "turn 1", session=session, context="CTX-1")
+    t2 = runner.run_sync(project, "writer", "turn 2", session=session, context="CTX-2")
+
+    assert built_with[0].endswith("CTX-1") and built_with[1].endswith("CTX-2")
+    assert "CTX-1" not in built_with[1]
+    assert [t.events[0].context_via for t in (t1, t2)] == ["instructions", "instructions"]
+    assert t1.events[0].prompt == "turn 1"

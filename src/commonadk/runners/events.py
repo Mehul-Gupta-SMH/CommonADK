@@ -64,6 +64,12 @@ class RunStarted(Event):
     `session_id` is the owning `RunSession.session_id` when the call is
     part of a multi-turn conversation, else `None` -- the field that lets a
     trace consumer tell a one-off turn from turn N of an ongoing session.
+
+    `prompt` is always the caller's own prompt. `context_via` says how the
+    run's `context` reached the agent: `"instructions"`, `"prompt"` (a
+    session turn reusing an agent built earlier -- see `BaseRunner.run`),
+    or `None` when no context was given. `user_id` is the owning
+    `RunSession.user_id`, if any.
     """
 
     kind: ClassVar[str] = "run_started"
@@ -72,6 +78,8 @@ class RunStarted(Event):
     agent_name: str
     prompt: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    context_via: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)

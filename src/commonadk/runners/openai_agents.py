@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession
+from .base import BaseRunner, RunSession, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -55,6 +55,7 @@ class OpenAIAgentsRunner(BaseRunner):
         *,
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
+        context: Optional[str] = None,
     ) -> Trace:
         from agents import Runner, SQLiteSession
         from agents.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent
@@ -67,7 +68,7 @@ class OpenAIAgentsRunner(BaseRunner):
         # Left outside try/except for the same reason as the Google ADK
         # runner: a build failure (missing env var, unbuildable graph)
         # means the run never started at all -- see that module's comment.
-        starting_agent = project.build(agent_name, target="openai")
+        starting_agent = with_context(project, agent_name, context).build(agent_name, target="openai")
 
         native_session = None
         if session is not None:
@@ -86,6 +87,8 @@ class OpenAIAgentsRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
+                user_id=session.user_id if session is not None else None,
+                context_via="instructions" if context else None,
             ),
         )
 
