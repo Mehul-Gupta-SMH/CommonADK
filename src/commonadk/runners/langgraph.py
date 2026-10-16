@@ -211,7 +211,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession, with_context
+from .base import BaseRunner, RunSession, plan_delivery, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -241,6 +241,7 @@ class LangGraphRunner(BaseRunner):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         from langchain_core.messages import AIMessage, ToolMessage
 
@@ -254,7 +255,9 @@ class LangGraphRunner(BaseRunner):
         # below. The graph itself is rebuilt fresh every turn -- see module
         # docstring, "Session/multi-turn" -- history lives in `session`,
         # never in the graph object.
-        graph = with_context(project, agent_name, context).build(agent_name, target=self.target)
+        # Rebuilt on every call: stable context always reaches the instructions.
+        delivery = plan_delivery(prompt, context=context, turn_context=turn_context, reusing=False)
+        graph = with_context(project, agent_name, delivery.build_context).build(agent_name, target=self.target)
 
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         history: list[Any] = state.get("messages", [])
@@ -269,7 +272,8 @@ class LangGraphRunner(BaseRunner):
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
                 user_id=session.user_id if session is not None else None,
-                context_via="instructions" if context else None,
+                context_via=delivery.context_via,
+                turn_context_via=delivery.turn_context_via,
             ),
         )
 
@@ -279,7 +283,7 @@ class LangGraphRunner(BaseRunner):
         final_messages: list[Any] = []
 
         try:
-            input_messages = [*history, {"role": "user", "content": prompt}]
+            input_messages = [*history, {"role": "user", "content": delivery.prompt}]
             async for namespace, values in graph.astream(
                 {"messages": input_messages}, stream_mode="values", subgraphs=True
             ):

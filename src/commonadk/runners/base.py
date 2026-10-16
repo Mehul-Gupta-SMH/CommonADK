@@ -80,12 +80,60 @@ def with_context(project: "Project", agent_name: str, context: Optional[str]) ->
 
 
 def prompt_with_context(prompt: str, context: Optional[str]) -> str:
-    """`prompt` preceded by `context` -- the fallback delivery for a session
-    turn whose SDK object was built on an earlier turn and so can no longer
-    take new instructions (see `BaseRunner.run`, "context")."""
+    """`prompt` preceded by `context` (or `prompt` unchanged when there is
+    none)."""
     if not context:
         return prompt
     return f"{context}{CONTEXT_SEPARATOR}{prompt}"
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """How one run's `context` and `turn_context` reach the agent."""
+
+    prompt: str
+    """What to send as the turn's input."""
+    build_context: Optional[str]
+    """What to build the agent's instructions with (`with_context`), or
+    None when this turn reuses an agent built earlier."""
+    context_via: Optional[str]
+    turn_context_via: Optional[str]
+
+
+def plan_delivery(
+    prompt: str,
+    *,
+    context: Optional[str],
+    turn_context: Optional[str],
+    reusing: bool,
+    built_context: Optional[str] = None,
+) -> Delivery:
+    """The one place every runner decides where context goes.
+
+    `context` is **stable** (it changes rarely), so it belongs in the
+    instructions -- built in on a turn that builds the agent. A reused agent
+    already carries the context it was built with: the same context again
+    needs nothing, a changed one rides on the prompt. `turn_context` changes
+    every turn and always rides on the prompt, after any stable context and
+    before the caller's prompt.
+    """
+    prefix = []
+    if not context:
+        via = None
+    elif not reusing or context == built_context:
+        via = "instructions"
+    else:
+        via = "prompt"
+        prefix.append(context)
+    turn_via = "prompt" if turn_context else None
+    if turn_context:
+        prefix.append(turn_context)
+    return Delivery(
+        prompt=CONTEXT_SEPARATOR.join([*prefix, prompt]),
+        build_context=None if reusing else context,
+        context_via=via,
+        turn_context_via=turn_via,
+    )
 
 
 class BaseRunner(ABC):
@@ -110,19 +158,26 @@ class BaseRunner(ABC):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         """Run one turn and return its `Trace` (events + rollup).
 
-        `context` is per-run text for the agent -- memory, retrieved
-        documents -- delivered as part of the entry agent's *instructions*
-        (`with_context`) whenever this turn builds the agent. A session turn
-        that reuses an SDK object built on an earlier turn (Google ADK's
-        bound runner, the Claude client, AutoGen's team) cannot take new
-        instructions, so there the context goes in front of the prompt
-        instead (`prompt_with_context`). Never silently: `RunStarted.
-        context_via` says which happened (`"instructions"`, `"prompt"`, or
-        `None` when no context was given), and `RunStarted.prompt` is always
-        the caller's own prompt, never the context-carrying one -- so a
+        Two kinds of per-run text for the agent (see `plan_delivery`):
+
+        - `context` -- **stable** text (memory about the user, standing
+          constraints): delivered in the entry agent's *instructions*
+          (`with_context`) whenever this turn builds the agent. A session
+          turn that reuses an SDK object built earlier (Google ADK's bound
+          runner, the Claude client, AutoGen's team) already carries the
+          context it was built with; a *changed* context then rides on the
+          prompt instead.
+        - `turn_context` -- **per-turn** text (what is relevant to this
+          request): always in front of the prompt, so it never changes the
+          instructions and never defeats prompt caching.
+
+        Never silently: `RunStarted.context_via` / `turn_context_via` say
+        where each went (`"instructions"`, `"prompt"`, or `None`), and
+        `RunStarted.prompt` is always the caller's own prompt -- so a
         consumer recording what the user said does not record its own
         injected memory back as user input.
 
@@ -154,10 +209,14 @@ class BaseRunner(ABC):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         """Synchronous convenience wrapper around `run` (`asyncio.run`)."""
         return asyncio.run(
-            self.run(project, agent_name, prompt, session=session, hooks=hooks, context=context)
+            self.run(
+                project, agent_name, prompt, session=session, hooks=hooks,
+                context=context, turn_context=turn_context,
+            )
         )
 
     @staticmethod
@@ -173,4 +232,12 @@ class BaseRunner(ABC):
             hooks.fire(event)
 
 
-__all__ = ["BaseRunner", "RunSession", "with_context", "prompt_with_context", "CONTEXT_SEPARATOR"]
+__all__ = [
+    "BaseRunner",
+    "RunSession",
+    "with_context",
+    "prompt_with_context",
+    "plan_delivery",
+    "Delivery",
+    "CONTEXT_SEPARATOR",
+]

@@ -111,7 +111,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession, with_context
+from .base import BaseRunner, RunSession, plan_delivery, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -144,6 +144,7 @@ class CrewAIRunner(BaseRunner):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         if session is not None:
             # See module docstring, "NO SESSION STORY (v1)" -- raised before
@@ -182,7 +183,9 @@ class CrewAIRunner(BaseRunner):
 
         # Left outside try/except for the same reason as every other
         # runner: a build failure means the run never actually started.
-        crew = with_context(project, agent_name, context).build(agent_name, target="crewai")
+        # Rebuilt on every call: stable context always reaches the instructions.
+        delivery = plan_delivery(prompt, context=context, turn_context=turn_context, reusing=False)
+        crew = with_context(project, agent_name, delivery.build_context).build(agent_name, target="crewai")
 
         relevant_agent_ids = {str(a.id) for a in crew.agents}
         if crew.manager_agent is not None:
@@ -200,7 +203,8 @@ class CrewAIRunner(BaseRunner):
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=None,
-                context_via="instructions" if context else None,
+                context_via=delivery.context_via,
+                turn_context_via=delivery.turn_context_via,
             ),
         )
 
@@ -367,7 +371,7 @@ class CrewAIRunner(BaseRunner):
                 task_agent = None if crew.process == Process.hierarchical else crew.agents[0]
                 crew.tasks = [
                     Task(
-                        description=prompt,
+                        description=delivery.prompt,
                         expected_output="A complete response to the request above.",
                         agent=task_agent,
                     )

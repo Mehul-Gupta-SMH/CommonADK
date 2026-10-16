@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession, prompt_with_context, with_context
+from .base import BaseRunner, RunSession, plan_delivery, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -51,6 +51,7 @@ class GoogleADKRunner(BaseRunner):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         from google.adk.runners import InMemoryRunner
         from google.genai import types as genai_types
@@ -69,20 +70,22 @@ class GoogleADKRunner(BaseRunner):
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         adk_runner = state.get("runner")
         # A later session turn reuses the runner (and the agent inside it)
-        # bound on turn 1, so its instructions are fixed: context for that
-        # turn rides on the prompt instead (BaseRunner.run, "context").
+        # bound on turn 1, so its instructions are fixed (BaseRunner.run).
         reusing = adk_runner is not None
-        built_from = project if reusing else with_context(project, agent_name, context)
-        agent = built_from.build(agent_name, target="google-adk")
+        delivery = plan_delivery(
+            prompt, context=context, turn_context=turn_context,
+            reusing=reusing, built_context=state.get("built_context"),
+        )
+        agent = with_context(project, agent_name, delivery.build_context).build(agent_name, target="google-adk")
         if adk_runner is None:
             adk_runner = InMemoryRunner(agent=agent, app_name=project.config.name)
             if session is not None:
                 state["runner"] = adk_runner
+                state["built_context"] = context
         user_id = state.setdefault(
             "user_id", (session.user_id if session is not None else None) or "commonadk-runner"
         )
-        context_via = ("prompt" if reusing else "instructions") if context else None
-        sent_prompt = prompt_with_context(prompt, context) if reusing else prompt
+        sent_prompt = delivery.prompt
 
         self._emit(
             trace,
@@ -94,7 +97,8 @@ class GoogleADKRunner(BaseRunner):
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
                 user_id=session.user_id if session is not None else None,
-                context_via=context_via,
+                context_via=delivery.context_via,
+                turn_context_via=delivery.turn_context_via,
             ),
         )
 

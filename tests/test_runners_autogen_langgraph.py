@@ -506,11 +506,14 @@ def test_autogen_context_goes_to_system_message_then_task_on_reuse(
 
     t1 = runner.run_sync(project, "writer", "turn 1", session=session, context="CTX-1")
     t2 = runner.run_sync(project, "writer", "turn 2", session=session, context="CTX-2")
+    t3 = runner.run_sync(project, "writer", "turn 3", session=session, context="CTX-1", turn_context="T3")
 
-    (sys1, task1), (sys2, task2) = seen
+    (sys1, task1), (sys2, task2), (sys3, task3) = seen
     assert sys1.endswith("CTX-1") and task1 == "turn 1"
     assert sys2 == sys1 and task2 == "CTX-2\n\nturn 2"
-    assert [t.events[0].context_via for t in (t1, t2)] == ["instructions", "prompt"]
+    assert sys3 == sys1 and task3 == "T3\n\nturn 3"
+    assert [t.events[0].context_via for t in (t1, t2, t3)] == ["instructions", "prompt", "instructions"]
+    assert t3.events[0].turn_context_via == "prompt"
     assert t2.events[0].user_id == "ada"
 
 

@@ -8,19 +8,24 @@ breaking changes can land in a patch release and are called out explicitly.
 
 ### Added
 
-- **Per-run context: `runner.run(..., context=...)` on all six targets.**
-  The context is appended to the entry agent's instructions through one
-  SDK-neutral helper (`with_context`: build from a project copy, since every
-  adapter reads `AgentSpec.instructions`). On a session turn that reuses an
-  SDK object built earlier (Google ADK, Claude, AutoGen) it goes in front of
-  the prompt instead. `RunStarted.context_via` reports which
-  (`"instructions"` / `"prompt"` / `None`), and `RunStarted.prompt` stays
-  the caller's own prompt. See docs/runner-design.md, "Per-run context".
+- **Per-run context on all six targets: `runner.run(..., context=...,
+  turn_context=...)`.** `context` is stable text and goes into the entry
+  agent's instructions, through one SDK-neutral helper (`with_context`:
+  build from a project copy, since every adapter reads
+  `AgentSpec.instructions`). `turn_context` is per-turn text and always goes
+  in front of the prompt, so it never changes the instructions or defeats
+  prompt caching. On a session turn that reuses an SDK object built earlier
+  (Google ADK, Claude, AutoGen) an unchanged `context` is already in the
+  instructions and is not re-sent; a changed one goes in front of the
+  prompt. `plan_delivery` makes that decision for every runner;
+  `RunStarted.context_via` / `turn_context_via` report the outcome, and
+  `RunStarted.prompt` stays the caller's own prompt. See
+  docs/runner-design.md, "Per-run context".
 - **`RunSession.user_id`**, carried onto `RunStarted.user_id`; the Google
   ADK runner uses it as the ADK session service's user id instead of the
   fixed `"commonadk-runner"`.
 
-Both new `RunStarted` fields default to `None`, so traces written by 0.0.3
+The new `RunStarted` fields default to `None`, so traces written by 0.0.3
 still load.
 
 ## 0.0.3 — 2026-10-12

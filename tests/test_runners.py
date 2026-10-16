@@ -964,6 +964,20 @@ def test_prompt_with_context():
     assert prompt_with_context("hi", None) == "hi"
 
 
+def test_plan_delivery():
+    from commonadk.runners import plan_delivery
+
+    fresh = plan_delivery("q", context="S", turn_context="T", reusing=False)
+    assert (fresh.prompt, fresh.build_context, fresh.context_via, fresh.turn_context_via) == (
+        "T\n\nq", "S", "instructions", "prompt")
+    same = plan_delivery("q", context="S", turn_context=None, reusing=True, built_context="S")
+    assert (same.prompt, same.build_context, same.context_via) == ("q", None, "instructions")
+    changed = plan_delivery("q", context="S2", turn_context="T", reusing=True, built_context="S")
+    assert (changed.prompt, changed.context_via) == ("S2\n\nT\n\nq", "prompt")
+    none = plan_delivery("q", context=None, turn_context=None, reusing=True)
+    assert (none.prompt, none.context_via, none.turn_context_via) == ("q", None, None)
+
+
 def test_run_started_carries_user_id_and_context_via_and_round_trips():
     e = RunStarted(target="openai", agent_name="a", prompt="p", user_id="u1", context_via="prompt")
     back = event_from_dict(json.loads(json.dumps(e.to_dict())))
@@ -1000,16 +1014,19 @@ def test_google_adk_context_goes_to_instructions_then_prompt_on_reuse(
     runner = GoogleADKRunner()
     session = RunSession(user_id="ada")
 
-    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
+    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1", turn_context="T1")
     t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
+    t3 = runner.run_sync(project, "coordinator", "turn 3", session=session, context="CTX-1")
 
-    (instr1, msg1, uid1), (instr2, msg2, uid2) = seen
-    assert instr1.endswith("CTX-1") and msg1 == "turn 1"
-    assert "CTX-2" not in instr2 and msg2 == "CTX-2\n\nturn 2"  # reused agent: via prompt
+    (instr1, msg1, uid1), (instr2, msg2, uid2), (instr3, msg3, _) = seen
+    assert instr1.endswith("CTX-1") and "T1" not in instr1 and msg1 == "T1\n\nturn 1"
+    assert "CTX-2" not in instr2 and msg2 == "CTX-2\n\nturn 2"  # changed, reused agent: via prompt
+    assert msg3 == "turn 3"  # unchanged stable context: already in the instructions
     assert uid1 == uid2 == "ada"  # the session's user, not the runner default
-    starts = [t.events[0] for t in (t1, t2)]
-    assert [s.context_via for s in starts] == ["instructions", "prompt"]
-    assert [s.prompt for s in starts] == ["turn 1", "turn 2"]  # caller's own prompt
+    starts = [t.events[0] for t in (t1, t2, t3)]
+    assert [s.context_via for s in starts] == ["instructions", "prompt", "instructions"]
+    assert [s.turn_context_via for s in starts] == ["prompt", None, None]
+    assert [s.prompt for s in starts] == ["turn 1", "turn 2", "turn 3"]  # caller's own prompt
     assert {s.user_id for s in starts} == {"ada"}
 
 
@@ -1034,11 +1051,11 @@ def test_openai_agents_context_goes_to_instructions_every_turn(
     runner = OpenAIAgentsRunner()
     session = RunSession(user_id="ada")
 
-    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
+    t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1", turn_context="T1")
     t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
     t3 = runner.run_sync(project, "coordinator", "turn 3", session=session)
 
-    assert seen[0][0].endswith("CTX-1") and seen[0][1] == "turn 1"
+    assert seen[0][0].endswith("CTX-1") and "T1" not in seen[0][0] and seen[0][1] == "T1\n\nturn 1"
     assert seen[1][0].endswith("CTX-2") and "CTX-1" not in seen[1][0] and seen[1][1] == "turn 2"
     assert "CTX" not in seen[2][0]
     assert [t.events[0].context_via for t in (t1, t2, t3)] == ["instructions", "instructions", None]

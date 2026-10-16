@@ -66,9 +66,10 @@ class RunStarted(Event):
     trace consumer tell a one-off turn from turn N of an ongoing session.
 
     `prompt` is always the caller's own prompt. `context_via` says how the
-    run's `context` reached the agent: `"instructions"`, `"prompt"` (a
-    session turn reusing an agent built earlier -- see `BaseRunner.run`),
-    or `None` when no context was given. `user_id` is the owning
+    run's stable `context` reached the agent: `"instructions"`, `"prompt"`
+    (a reused agent built with a different context -- see `BaseRunner.run`),
+    or `None` when none was given; `turn_context_via` is `"prompt"` when a
+    `turn_context` was given, else `None`. `user_id` is the owning
     `RunSession.user_id`, if any.
     """
 
@@ -80,6 +81,7 @@ class RunStarted(Event):
     session_id: Optional[str] = None
     user_id: Optional[str] = None
     context_via: Optional[str] = None
+    turn_context_via: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)

@@ -930,12 +930,13 @@ def test_claude_context_goes_to_system_prompt_then_prompt_on_reuse(
     session = RunSession(user_id="ada")
 
     t1 = runner.run_sync(project, "coordinator", "turn 1", session=session, context="CTX-1")
-    t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2")
+    t2 = runner.run_sync(project, "coordinator", "turn 2", session=session, context="CTX-2", turn_context="T2")
+    t3 = runner.run_sync(project, "coordinator", "turn 3", session=session, context="CTX-1")
 
     assert len(system_prompts) == 1 and system_prompts[0].endswith("CTX-1")
-    assert queries == ["turn 1", "CTX-2\n\nturn 2"]
-    assert [t.events[0].context_via for t in (t1, t2)] == ["instructions", "prompt"]
-    assert [t.events[0].prompt for t in (t1, t2)] == ["turn 1", "turn 2"]
+    assert queries == ["turn 1", "CTX-2\n\nT2\n\nturn 2", "turn 3"]
+    assert [t.events[0].context_via for t in (t1, t2, t3)] == ["instructions", "prompt", "instructions"]
+    assert [t.events[0].prompt for t in (t1, t2, t3)] == ["turn 1", "turn 2", "turn 3"]
     assert t1.events[0].user_id == "ada"
 
 
@@ -959,5 +960,5 @@ def test_crewai_context_goes_to_the_entry_agent_backstory(tmp_project, tavily_en
     project = load(str(tmp_project))
     runner = CrewAIRunner()
     with pytest.raises(RuntimeError, match="stop after"):
-        runner.run_sync(project, "coordinator", "go", context="CTX-1")
-    assert seen and seen[0].endswith("CTX-1")
+        runner.run_sync(project, "coordinator", "go", context="CTX-1", turn_context="T")
+    assert seen and seen[0].endswith("CTX-1") and "T" not in seen[0].split("CTX-1")[-1]

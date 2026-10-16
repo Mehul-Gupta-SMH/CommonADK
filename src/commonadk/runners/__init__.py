@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from .base import BaseRunner, RunSession, prompt_with_context, with_context
+from .base import BaseRunner, RunSession, plan_delivery, prompt_with_context, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -118,6 +118,7 @@ __all__ = [
     "RunSession",
     "with_context",
     "prompt_with_context",
+    "plan_delivery",
     "HookRegistry",
     "Trace",
     "Event",

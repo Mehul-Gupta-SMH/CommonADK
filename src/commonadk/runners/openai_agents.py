@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession, with_context
+from .base import BaseRunner, RunSession, plan_delivery, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -56,6 +56,7 @@ class OpenAIAgentsRunner(BaseRunner):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         from agents import Runner, SQLiteSession
         from agents.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent
@@ -68,7 +69,9 @@ class OpenAIAgentsRunner(BaseRunner):
         # Left outside try/except for the same reason as the Google ADK
         # runner: a build failure (missing env var, unbuildable graph)
         # means the run never started at all -- see that module's comment.
-        starting_agent = with_context(project, agent_name, context).build(agent_name, target="openai")
+        # Rebuilt on every call: stable context always reaches the instructions.
+        delivery = plan_delivery(prompt, context=context, turn_context=turn_context, reusing=False)
+        starting_agent = with_context(project, agent_name, delivery.build_context).build(agent_name, target="openai")
 
         native_session = None
         if session is not None:
@@ -88,7 +91,8 @@ class OpenAIAgentsRunner(BaseRunner):
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
                 user_id=session.user_id if session is not None else None,
-                context_via="instructions" if context else None,
+                context_via=delivery.context_via,
+                turn_context_via=delivery.turn_context_via,
             ),
         )
 
@@ -100,7 +104,7 @@ class OpenAIAgentsRunner(BaseRunner):
         try:
             self._emit(trace, hooks, AgentStarted(run_id=run_id, agent_name=current_agent_name))
 
-            result = Runner.run_streamed(starting_agent, prompt, session=native_session)
+            result = Runner.run_streamed(starting_agent, delivery.prompt, session=native_session)
 
             async for stream_event in result.stream_events():
                 if isinstance(stream_event, AgentUpdatedStreamEvent):

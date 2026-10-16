@@ -164,7 +164,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..models import Project
 
-from .base import BaseRunner, RunSession, prompt_with_context, with_context
+from .base import BaseRunner, RunSession, plan_delivery, with_context
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -192,6 +192,7 @@ class AutoGenRunner(BaseRunner):
         session: Optional[RunSession] = None,
         hooks: Optional[HookRegistry] = None,
         context: Optional[str] = None,
+        turn_context: Optional[str] = None,
     ) -> Trace:
         from autogen_agentchat.base import TaskResult
         from autogen_agentchat.messages import (
@@ -211,15 +212,19 @@ class AutoGenRunner(BaseRunner):
         # started at all, so this stays outside the try/except below.
         state = session.native.setdefault(self.target, {}) if session is not None else {}
         built = state.get("built")
-        # A cached team keeps the system message it was built with, so a
-        # later turn's context rides on the task (BaseRunner.run, "context").
+        # A cached team keeps the system message it was built with
+        # (BaseRunner.run, "context").
         reusing = built is not None
+        delivery = plan_delivery(
+            prompt, context=context, turn_context=turn_context,
+            reusing=reusing, built_context=state.get("built_context"),
+        )
         if built is None:
-            built = with_context(project, agent_name, context).build(agent_name, target=self.target)
+            built = with_context(project, agent_name, delivery.build_context).build(agent_name, target=self.target)
             if session is not None:
                 state["built"] = built
-        context_via = ("prompt" if reusing else "instructions") if context else None
-        sent_prompt = prompt_with_context(prompt, context) if reusing else prompt
+                state["built_context"] = context
+        sent_prompt = delivery.prompt
 
         self._emit(
             trace,
@@ -231,7 +236,8 @@ class AutoGenRunner(BaseRunner):
                 prompt=prompt,
                 session_id=session.session_id if session is not None else None,
                 user_id=session.user_id if session is not None else None,
-                context_via=context_via,
+                context_via=delivery.context_via,
+                turn_context_via=delivery.turn_context_via,
             ),
         )
 

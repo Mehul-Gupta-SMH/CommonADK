@@ -403,35 +403,51 @@ follow-up runners, all of which do have some session story (see the table
 below), so no v1 runner currently exercises the raise path; a future runner
 without one should follow `BaseRunner.run`'s docstring exactly here.
 
-## Per-run context (`run(..., context=)`)
+## Per-run context (`run(..., context=, turn_context=)`)
 
 Hooks are observe-only, so they cannot put anything *into* a run. Per-run
-context -- memory from a store like CommonMemo, retrieved documents -- has
-its own parameter instead: `runner.run(project, agent, prompt, context=...)`
-on every target.
+text for the agent -- memory from a store like CommonMemo, retrieved
+documents -- has its own two parameters on every target, because it comes in
+two kinds that belong in different places:
 
-**Delivery: instructions, by one SDK-neutral mechanism.** Every adapter
-reads `AgentSpec.instructions` at build time, so `with_context(project,
-agent, context)` returns a copy of the project whose entry agent's
-instructions end with the context, and the runner builds from that copy.
-No adapter changes; all six targets get it the same way. Only the entry
-agent changes -- sub-agents keep their own instructions -- and the caller's
-`Project` is never mutated.
+| parameter | what it is | where it goes |
+|---|---|---|
+| `context` | **stable**: changes rarely (who the user is, standing constraints) | the entry agent's **instructions** |
+| `turn_context` | **per-turn**: what is relevant to this request | in front of this turn's **prompt** |
 
-**The reuse case.** Three runners keep an SDK object across the turns of a
-`RunSession`: Google ADK's bound `InMemoryRunner`, the Claude client, and
-AutoGen's cached team. That object was built with turn 1's instructions and
-cannot take new ones, so on turn 2+ the context goes in front of the prompt
-instead (`prompt_with_context`). This is reported, not silent:
+Keeping per-turn text out of the instructions matters twice over: providers
+cache the stable prefix of a prompt, and instructions that change every
+turn defeat that cache on every call; and instructions carry more authority
+than a message, so text that came from users or tools should not be
+promoted into them turn after turn.
 
-| `RunStarted.context_via` | meaning |
+**Instructions, by one SDK-neutral mechanism.** Every adapter reads
+`AgentSpec.instructions` at build time, so `with_context(project, agent,
+context)` returns a copy of the project whose entry agent's instructions end
+with the context, and the runner builds from that copy. No adapter changes;
+all six targets get it the same way. Only the entry agent changes --
+sub-agents keep their own instructions -- and the caller's `Project` is
+never mutated.
+
+**One decision point: `plan_delivery`.** Three runners keep an SDK object
+across the turns of a `RunSession`: Google ADK's bound `InMemoryRunner`,
+the Claude client, and AutoGen's cached team. That object carries the
+context it was built with. On a later turn:
+
+- the **same** `context` needs nothing -- it is already in the instructions;
+- a **changed** `context` cannot reach the instructions, so it goes in front
+  of the prompt instead;
+- `turn_context` always goes in front of the prompt (after any stable
+  context, before the caller's prompt).
+
+OpenAI Agents, LangGraph and CrewAI rebuild every call, so their stable
+context always reaches the instructions. Where each part went is reported,
+never silent:
+
+| `RunStarted` field | values |
 |---|---|
-| `"instructions"` | the agent was built this turn with the context in its instructions |
-| `"prompt"` | a reused agent; the context was prepended to this turn's prompt |
-| `None` | no context was given |
-
-OpenAI Agents, LangGraph and CrewAI rebuild every call, so they are always
-`"instructions"`.
+| `context_via` | `"instructions"` / `"prompt"` (a reused agent, changed context) / `None` |
+| `turn_context_via` | `"prompt"` / `None` |
 
 **`RunStarted.prompt` is always the caller's own prompt**, never the
 context-carrying one -- a memory system recording what the user said must
@@ -442,7 +458,7 @@ not record its own injected memory back as user input.
 session service's user id instead of the fixed `"commonadk-runner"`.
 
 Not covered yet: the CLI has no `--context` flag, and the mixed-runtime
-path (`mixed.py`) does not take `context`.
+path (`mixed.py`) takes neither parameter.
 
 ## Hook contract (`hooks.py`)
 
