@@ -4,6 +4,48 @@ All notable changes to CommonADK are recorded here. Versions follow
 [semantic versioning](https://semver.org/); while the project is pre-1.0,
 breaking changes can land in a patch release and are called out explicitly.
 
+## 0.0.4 — 2026-11-01
+
+**0.0.3 was never released.** Its version landed on `main` and its entry is
+below, but no `v0.0.3` tag was ever pushed, so `publish.yml` never ran and
+PyPI stopped at 0.0.2. 0.0.4 is therefore the first published release
+carrying 0.0.3's cache-token fix as well as the contracts below: PyPI goes
+0.0.2 → 0.0.4 with nothing in between, and a pin of `commonadk>=0.0.3`
+resolves to this.
+
+### Added
+
+- **`evaluation.yaml` → `DecisionSpec`: declared answer contracts, scored by
+  equality.** An agent has a persona in prose and returns free text, so
+  evaluating one means reading it — and reading it means a judge, whether
+  that judge is a person or another model. A spec declares the questions up
+  front, constrains each answer to a boolean (`predicate`) or one of a named
+  set (`choice`), and `score_case` compares by `==`. No threshold, no
+  similarity.
+
+  Loaded by `commonadk.load_decisions(path)`, never by `commonadk.load`: the
+  file is optional and a project without it is not incomplete.
+
+  Three states, not two. `correct` is `True`, `False`, or `None` — an
+  unanswered question leaves the rate's denominator rather than counting as
+  a miss, because scoring it wrong would make an abstaining agent
+  indistinguishable from a confidently incorrect one. `unanswered()` reports
+  how many cells were censored, and `accuracy_by_question()` is per question
+  and never blended.
+
+  Expectations are domain-checked at load time: a case expecting an answer
+  its question never offered is refused there, because every run against it
+  would score a failure that is the spec's fault. A bar nothing can clear is
+  not a measurement.
+
+  `DecisionAnswer.probability` is recorded with a `probability_calibrated`
+  flag defaulting to `False`. OpenAI's Decisions API returns per-answer
+  probabilities and whether they are calibrated is contested; a Brier score
+  over uncalibrated numbers looks like calibration and is not.
+
+  There is no `score` question kind. A score needs a threshold to become a
+  verdict, and a threshold is a judge with a parameter attached.
+
 ## 0.0.3 — 2026-10-12
 
 ### Added

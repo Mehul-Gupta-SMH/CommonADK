@@ -577,3 +577,138 @@ flowchart TD
     coordinator -- delegate --> researcher
     researcher -. handoff .-> writer
 ```
+
+## `evaluation.yaml` → `DecisionSpec` — optional, loaded separately
+
+Every other file above is part of a project; this one is not. It is loaded
+by `commonadk.load_decisions(path)`, never by `commonadk.load`, and a
+project without it is not an incomplete project. Declaring an answer
+contract is something an agent opts into.
+
+### Why it exists
+
+An agent has a persona — prose, in `skill.md` — and returns free text.
+Nothing declares what *shape* its answer takes, so evaluating one means
+reading it, and reading it means a judge: a person, or another model. This
+file is the other option. Declare the questions up front, constrain each
+answer to a boolean or a named set, and score by `==`.
+
+```yaml
+# evaluation.yaml -- a list of specs, one per agent
+- agent: triage
+  persona: support_triage
+  questions:
+    - name: is_urgent
+      kind: predicate
+      instructions: "True when the customer is blocked right now."
+    - name: category
+      kind: choice
+      choices: [billing, bug, feature, other]
+  cases:
+    - id: angry_billing
+      input: "I was charged twice and I cannot access my account."
+      expect:
+        is_urgent: true
+        category: billing
+```
+
+A single mapping is accepted instead of a list when there is only one
+agent to score. Anything else is an error rather than a guess.
+
+### Two kinds, and the one that is missing
+
+`predicate` is answered true or false. `choice` is answered with exactly
+one of at least two declared, unique, non-blank names.
+
+There is no `score` kind, and the omission is deliberate. A score is a
+number, and turning a number into a verdict needs a threshold — which is a
+judge with a parameter attached: move it and the same answer passes or
+fails. Adding it later is easy; it is left out so the first version cannot
+quietly reintroduce what the file was built to remove.
+
+### `persona` is recorded, not enforced
+
+The persona lives in `skill.md` as prose and nothing here can check that
+the questions match it. Naming it is what makes a spec traceable to the
+thing it was written for.
+
+### What is validated, and when
+
+At load time, not at scoring time:
+
+- `agent` must be named, and must exist in the project **when a `project`
+  is passed**. A spec naming an agent that does not exist scores nothing
+  and reports nothing, so the typo is silent until somebody wonders why a
+  column is empty. Without a project the names cannot be checked, and
+  `load_decisions` does not pretend to — it simply does not check.
+- Question names are unique; case ids are unique. Two contracts for one
+  agent is two different bars, and nothing downstream could say which one
+  a result was scored against.
+- **Every `expect` value must be inside its question's domain.** A case
+  expecting `category: refund` where the choices are `billing, bug,
+  feature` is refused here, because every run against it would score a
+  failure that is the spec's fault and nothing downstream could tell that
+  from the agent being wrong. A bar nothing can clear is not a
+  measurement.
+- Unknown keys are errors, as everywhere else in `common/`.
+
+### Scoring: three states, not two
+
+`score_case(spec, case, answers)` returns one `DecisionOutcome` per
+question the case expects. `correct` is `True`, `False`, or **`None`**:
+
+| the agent | `decidable` | `correct` |
+|---|---|---|
+| gave a declared answer | `True` | `True` / `False` by `==` |
+| answered outside the domain | `True` | `False`, and `out_of_domain` is set |
+| did not answer, or abstained | `False` | **`None`** |
+
+An unanswered question leaves the rate's denominator rather than counting
+as a miss. Scoring it wrong would make an abstaining agent
+indistinguishable from a confidently incorrect one, which is the
+difference most worth keeping. `unanswered(outcomes)` reports how many
+cells were censored, because a rate computed over two of twenty cells is
+arithmetically fine and worth almost nothing.
+
+`out_of_domain` is its own state rather than just a wrong answer because
+the remedy differs: a wrong answer is the agent's, an unparseable one is
+usually the output contract's.
+
+`accuracy_by_question(outcomes)` is per question and never blended. An
+agent perfect on three questions and useless on a fourth is not 75% of an
+agent, and one column cannot say which it is. A question with no decidable
+cell reads `None`, not `0.0` — which would read as "always wrong" about a
+question nobody managed to answer.
+
+### `probability` is recorded; it is not a calibration
+
+`DecisionAnswer` carries an optional `probability` and a
+`probability_calibrated` flag that **defaults to `False`**. That default is
+load-bearing.
+
+OpenAI's Decisions API (`POST /v1/decisions`, announced 2026-09-29) returns
+per-answer probabilities, and whether they are *calibrated* is contested:
+one source says production use requires calibrating thresholds yourself
+against labelled data, and an independent implementation of the same idea
+states outright that its values are not calibrated probabilities that the
+decision is correct. A Brier score computed over uncalibrated numbers is a
+figure that looks like calibration and is not. So the flag travels with the
+number, and `DecisionAnswer.calibratable` is true only when a probability
+is present *and* something declared it calibrated.
+
+### Why these field names and not OpenAI's
+
+The Decisions API does this job at the model and is the obvious backend for
+this spec; the two question kinds above borrow its vocabulary. The wire
+format is deliberately not mirrored: as of writing the endpoint is in
+limited preview, no official reference was reachable, three third-party
+documentation sources disagree on the field names, and at least one
+independent implementation rejects any unknown field with HTTP 400. A spec
+that mirrors an unstable schema inherits every revision of it.
+
+So this is commonadk's own stable shape, and the Decisions API is one thing
+that can answer it. Enforcement is left open on purpose — native
+structured output is not uniformly available across the targets (this
+repo's own AutoGen `ModelInfo` declares `structured_output: False` for
+Anthropic-native and `True` for Gemini), so a contract enforced on one
+target and merely requested on another would not be one contract.
