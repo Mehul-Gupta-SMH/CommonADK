@@ -22,9 +22,23 @@ from .models import (
     ToolParameter,
     ToolSpec,
 )
+from .decisions import (
+    AnswerValue,
+    DecisionAnswer,
+    DecisionCase,
+    DecisionKind,
+    DecisionOutcome,
+    DecisionQuestion,
+    DecisionSpec,
+    accuracy_by_question,
+    load_decisions,
+    score_case,
+    unanswered,
+)
 from .validation import ValidationError
 
 __all__ = [
+    "AnswerValue",
     "BaseAdapter",
     "get_adapter",
     "load",
@@ -46,4 +60,15 @@ __all__ = [
     "ToolParameter",
     "ToolSpec",
     "ValidationError",
+    # Declared answer contracts, scored by equality (no judge).
+    "DecisionAnswer",
+    "DecisionCase",
+    "DecisionKind",
+    "DecisionOutcome",
+    "DecisionQuestion",
+    "DecisionSpec",
+    "accuracy_by_question",
+    "load_decisions",
+    "score_case",
+    "unanswered",
 ]
