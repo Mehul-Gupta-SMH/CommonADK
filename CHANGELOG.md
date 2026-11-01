@@ -4,7 +4,14 @@ All notable changes to CommonADK are recorded here. Versions follow
 [semantic versioning](https://semver.org/); while the project is pre-1.0,
 breaking changes can land in a patch release and are called out explicitly.
 
-## Unreleased
+## 0.0.4 — 2026-11-01
+
+**0.0.3 was never released.** Its version landed on `main` and its entry is
+below, but no `v0.0.3` tag was ever pushed, so `publish.yml` never ran and
+PyPI stopped at 0.0.2. 0.0.4 is therefore the first published release
+carrying 0.0.3's cache-token fix as well as the contracts below: PyPI goes
+0.0.2 → 0.0.4 with nothing in between, and a pin of `commonadk>=0.0.3`
+resolves to this.
 
 ### Added
 
